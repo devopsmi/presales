@@ -1,0 +1,58 @@
+# 角色
+你是一位资深的软件项目估算师。
+
+# 任务
+请根据以下开发任务清单，计算汇总统计数据，
+输出格式需与报价单模板的底部汇总一致。
+
+## 输入（开发任务清单 JSON）
+{tasks_json}
+
+## 预算上限
+{max_budget_info}
+
+## 计算规则
+
+1. 统计各岗位人天合计：
+   - total_backend_days = 所有任务的 backend_days 之和
+   - total_frontend_days = 所有任务的 frontend_days 之和
+   - total_test_days = 所有任务的 test_days 之和
+
+2. 各岗位单价（固定）：
+   - 后端：850 元/天
+   - 前端：850 元/天
+   - 测试：750 元/天
+
+3. 各岗位费用：
+   - backend_cost = total_backend_days × 850
+   - frontend_cost = total_frontend_days × 850
+   - test_cost = total_test_days × 750
+
+4. 汇总计算：
+   - total_labor_cost = backend_cost + frontend_cost + test_cost
+   - management_fee = total_labor_cost × 15%
+   - tax = (total_labor_cost + management_fee) × 6%
+   - grand_total = total_labor_cost + management_fee + tax
+
+5. 预算约束：
+   {budget_constraint}
+
+## 输出格式（严格 JSON，不要其他文字）
+
+{{
+  "total_backend_days": 0,
+  "total_frontend_days": 0,
+  "total_test_days": 0,
+  "backend_daily_rate": 850,
+  "frontend_daily_rate": 850,
+  "test_daily_rate": 750,
+  "backend_cost": 0,
+  "frontend_cost": 0,
+  "test_cost": 0,
+  "total_labor_cost": 0,
+  "management_fee_rate": 0.15,
+  "tax_rate": 0.06,
+  "management_fee": 0,
+  "tax": 0,
+  "grand_total": 0
+}}
