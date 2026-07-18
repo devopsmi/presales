@@ -1,0 +1,160 @@
+<template>
+  <div>
+    <div v-if="loading" style="text-align: center; padding: 40px">
+      <el-icon class="is-loading" :size="32">
+        <i class="el-icon-loading" />
+      </el-icon>
+      <p style="margin-top: 12px; color: #999">正在生成报价方案…</p>
+    </div>
+
+    <template v-else-if="plans.length > 0">
+      <el-alert
+        title="选择方案后点击确认进入下一步"
+        type="info"
+        show-icon
+        style="margin-bottom: 16px"
+        closable
+      />
+
+      <el-radio-group v-model="selectedPlanId" style="width: 100%">
+        <el-card
+          v-for="plan in plans"
+          :key="plan.id"
+          :class="['plan-card', { selected: selectedPlanId === plan.id }]"
+          shadow="hover"
+          style="margin-bottom: 16px; cursor: pointer"
+          @click="selectedPlanId = plan.id"
+        >
+          <el-radio :value="plan.id" style="margin-bottom: 12px">
+            <span style="font-weight: 600; font-size: 16px">
+              {{ planLabel(plan) }}
+            </span>
+            <el-tag
+              :type="plan.within_target ? 'success' : 'warning'"
+              size="small"
+              style="margin-left: 8px"
+            >
+              {{ plan.within_target ? '达标' : '未达标' }}
+            </el-tag>
+          </el-radio>
+
+          <!-- 调整说明 -->
+          <el-alert
+            v-for="(adj, i) in plan.adjustments"
+            :key="i"
+            :title="adj"
+            type="warning"
+            show-icon
+            size="small"
+            style="margin-bottom: 8px"
+            :closable="false"
+          />
+
+          <el-descriptions :column="3" size="small" border style="margin-top: 8px">
+            <el-descriptions-item label="人工费（元）">
+              {{ formatCents(plan.labor_cents) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="税费（元）">
+              {{ formatCents(plan.tax_cents) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="含税合计（元）">
+              <span style="font-weight: 600">{{ formatCents(plan.gross_cents) }}</span>
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <!-- 明细表格 -->
+          <el-table :data="plan.lines" style="width: 100%; margin-top: 12px" size="small">
+            <el-table-column prop="role" label="角色" width="100" />
+            <el-table-column label="单价（元/人天）" width="140">
+              <template #default="{ row }">
+                {{ (row.unit_price_cents / 100).toFixed(0) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="分配（半天）" width="120">
+              <template #default="{ row }">
+                {{ row.half_day_units }} 单位（{{ (row.half_day_units / 2).toFixed(1) }} 人天）
+              </template>
+            </el-table-column>
+            <el-table-column label="小计（元）" width="120">
+              <template #default="{ row }">
+                {{ formatCents(Math.round(row.unit_price_cents * row.half_day_units / 2)) }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-radio-group>
+
+      <div style="text-align: right; margin-top: 16px">
+        <el-button
+          type="primary"
+          :disabled="!selectedPlanId"
+          :loading="confirming"
+          @click="handleConfirm"
+        >
+          确认方案
+        </el-button>
+      </div>
+    </template>
+
+    <el-empty v-else description="暂无报价方案" />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
+import type { QuotePlan } from '@/types/pricing'
+
+const props = defineProps<{
+  plans: QuotePlan[]
+  loading: boolean
+  projectId: string
+  runId: string | null
+}>()
+
+const emit = defineEmits<{
+  selected: [planId: string, runId: string]
+}>()
+
+const selectedPlanId = ref<string | null>(null)
+const confirming = ref(false)
+
+const PLAN_LABELS: Record<string, string> = {
+  recommended: '推荐方案',
+  adjusted: '调整方案',
+  closest: '最接近方案',
+}
+
+function planLabel(plan: QuotePlan): string {
+  return PLAN_LABELS[plan.kind] || plan.kind
+}
+
+function formatCents(cents: number): string {
+  return (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+async function handleConfirm() {
+  if (!selectedPlanId.value || !props.runId) return
+  confirming.value = true
+  try {
+    emit('selected', selectedPlanId.value, props.runId)
+  } finally {
+    confirming.value = false
+  }
+}
+
+watch(() => props.plans, (plans) => {
+  if (plans.length > 0 && !selectedPlanId.value) {
+    // 默认选中第一个达标方案或第一个方案
+    const recommended = plans.find(p => p.within_target)
+    selectedPlanId.value = recommended?.id || plans[0].id
+  }
+}, { immediate: true })
+</script>
+
+<style scoped>
+.plan-card.selected {
+  border-color: #409eff;
+  box-shadow: 0 0 0 1px #409eff;
+}
+</style>

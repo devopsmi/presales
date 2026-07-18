@@ -18,6 +18,14 @@ export function confirmRequirements(projectId: string, requirements: Requirement
   return http.put(`/api/v1/projects/${projectId}/confirmed-requirements`, { requirements })
 }
 
+export function startPricingRun(projectId: string): Promise<{ run_id: string }> {
+  return http.post(`/api/v1/projects/${projectId}/pricing-runs`, {})
+}
+
+export function selectScenario(projectId: string, runId: string, scenarioId: string): Promise<{ stage: string }> {
+  return http.put(`/api/v1/projects/${projectId}/selected-scenario`, { run_id: runId, scenario_id: scenarioId })
+}
+
 export function getProjectRuns(projectId: string): Promise<{ items: RunResponse[]; total: number }> {
   return http.get(`/api/v1/projects/${projectId}/runs`)
 }

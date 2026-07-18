@@ -1,4 +1,5 @@
 import type { AnalysisPayload, RequirementNode } from './requirement'
+import type { PricingPayload } from './pricing'
 
 export interface RunResponse {
   id: string
@@ -8,6 +9,7 @@ export interface RunResponse {
   error_message: string | null
   analysis_payload: AnalysisPayload | null
   confirmed_requirements: RequirementNode[] | null
+  pricing_payload: PricingPayload | null
   created_at: string
   updated_at: string
 }

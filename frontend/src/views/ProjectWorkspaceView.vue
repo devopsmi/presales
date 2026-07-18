@@ -57,9 +57,14 @@
         @confirmed="onConfirmed"
       />
 
-      <div v-if="activeStep === 2" style="text-align: center; padding: 40px; color: #999">
-        工时与报价（待 Task 3 实现）
-      </div>
+      <PricingStep
+        v-if="activeStep === 2"
+        :plans="pricingPlans"
+        :loading="pricingLoading"
+        :project-id="project.id"
+        :run-id="pricingRunId"
+        @selected="onScenarioSelected"
+      />
 
       <div v-if="activeStep === 3" style="text-align: center; padding: 40px; color: #999">
         文件导出（待 Task 4 实现）
@@ -99,8 +104,11 @@ import { getProject, createProject, updateProject, deleteProject } from '@/api/p
 import ProjectForm from '@/components/ProjectForm.vue'
 import ProjectSetupStep from '@/components/ProjectSetupStep.vue'
 import RequirementDraftEditor from '@/components/RequirementDraftEditor.vue'
+import PricingStep from '@/components/PricingStep.vue'
 import type { Project, ProjectCreate } from '@/types/project'
 import type { RunResponse } from '@/types/run'
+import type { QuotePlan } from '@/types/pricing'
+import { startPricingRun, selectScenario, getRun } from '@/api/runs'
 
 const route = useRoute()
 const router = useRouter()
@@ -109,6 +117,9 @@ const loading = ref(false)
 const showEdit = ref(false)
 const activeStep = ref(0)
 const analysisRun = ref<RunResponse | null>(null)
+const pricingPlans = ref<QuotePlan[]>([])
+const pricingLoading = ref(false)
+const pricingRunId = ref<string | null>(null)
 
 const isCreating = computed(() => route.params.id === 'new')
 
@@ -205,6 +216,53 @@ function onAnalysisDone(run: RunResponse) {
 function onConfirmed() {
   activeStep.value = 2
   ElMessage.success('已进入报价阶段')
+  startPricing()
+}
+
+async function startPricing() {
+  if (!project.value) return
+  pricingLoading.value = true
+  pricingPlans.value = []
+  try {
+    const { run_id } = await startPricingRun(project.value.id)
+    pricingRunId.value = run_id
+    // 轮询定价结果
+    const poll = setInterval(async () => {
+      try {
+        const run = await getRun(run_id)
+        if (run.status === 'succeeded') {
+          clearInterval(poll)
+          pricingLoading.value = false
+          pricingPlans.value = run.pricing_payload?.plans || []
+          // 刷新项目信息以更新 stage
+          project.value = await getProject(project.value!.id)
+        } else if (run.status === 'failed') {
+          clearInterval(poll)
+          pricingLoading.value = false
+          ElMessage.error(`报价生成失败: ${run.error_message || '未知错误'}`)
+        }
+      } catch {
+        clearInterval(poll)
+        pricingLoading.value = false
+        ElMessage.error('查询任务状态失败')
+      }
+    }, 1000)
+  } catch (err) {
+    pricingLoading.value = false
+    ElMessage.error(err instanceof Error ? err.message : '启动报价失败')
+  }
+}
+
+async function onScenarioSelected(planId: string, runId: string) {
+  if (!project.value) return
+  try {
+    await selectScenario(project.value.id, runId, planId)
+    ElMessage.success('方案已确认')
+    project.value = await getProject(project.value.id)
+    activeStep.value = 3
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '方案确认失败')
+  }
 }
 
 onMounted(loadProject)
