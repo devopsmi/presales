@@ -64,18 +64,23 @@
 
           <!-- 明细表格 -->
           <el-table :data="plan.lines" style="width: 100%; margin-top: 12px" size="small">
+            <el-table-column label="功能" min-width="160">
+              <template #default="{ row }">
+                {{ row.work_package_name || row.work_package_id || '-' }}
+              </template>
+            </el-table-column>
             <el-table-column prop="role" label="角色" width="100" />
-            <el-table-column label="单价（元/人天）" width="140">
+            <el-table-column label="单价（元/人天）" width="130">
               <template #default="{ row }">
                 {{ (row.unit_price_cents / 100).toFixed(0) }}
               </template>
             </el-table-column>
-            <el-table-column label="分配（半天）" width="120">
+            <el-table-column label="分配（半天）" width="110">
               <template #default="{ row }">
-                {{ row.half_day_units }} 单位（{{ (row.half_day_units / 2).toFixed(1) }} 人天）
+                {{ row.half_day_units }}（{{ (row.half_day_units / 2).toFixed(1) }}天）
               </template>
             </el-table-column>
-            <el-table-column label="小计（元）" width="120">
+            <el-table-column label="小计（元）" width="110">
               <template #default="{ row }">
                 {{ formatCents(Math.round(row.unit_price_cents * row.half_day_units / 2)) }}
               </template>

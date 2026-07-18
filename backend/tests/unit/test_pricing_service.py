@@ -11,7 +11,7 @@ def test_current_config_returns_one_plan_when_target_is_reachable():
     plans = service.build_plans(
         target_gross_cents=250_000,
         roles=[RoleConfig(name="产品", unit_price_cents=80_000, is_required=True)],
-        work_packages=[WorkPackage(id="f1", role_names=["产品"], weight=1)],
+        work_packages=[WorkPackage(id="f1", name="功能1", role_names=["产品"], weight=1)],
     )
     assert len(plans) == 1
     assert plans[0].kind == "recommended"
@@ -23,7 +23,7 @@ def test_unreachable_current_config_returns_at_most_three_adjusted_plans():
     plans = service.build_plans(
         target_gross_cents=10_000_000,
         roles=[RoleConfig(name="产品", unit_price_cents=80_000, is_required=True)],
-        work_packages=[WorkPackage(id="f1", role_names=["产品"], weight=1)],
+        work_packages=[WorkPackage(id="f1", name="功能1", role_names=["产品"], weight=1)],
     )
     assert 1 <= len(plans) <= 3
     assert all(plan.kind in {"adjusted", "closest"} for plan in plans)

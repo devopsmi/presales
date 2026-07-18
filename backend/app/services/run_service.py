@@ -105,6 +105,7 @@ class RunService:
             work_packages = [
                 WorkPackage(
                     id=req["id"],
+                    name=req.get("module", "") + "·" + req["feature"],
                     role_names=req.get("suggested_roles", []) or [],
                     weight=req.get("complexity_weight", 3),
                 )

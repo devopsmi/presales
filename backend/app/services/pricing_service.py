@@ -85,6 +85,7 @@ class PricingService:
                     continue
                 lines.append(QuoteLine(
                     work_package_id=wp.id,
+                    work_package_name=wp.name,
                     role=role_name,
                     unit_price_cents=role.unit_price_cents,
                     half_day_units=1,  # 从 1 开始

@@ -60,13 +60,12 @@ class OpenAIAgent:
         user_prompt = self._build_user_prompt(materials_text, supplement)
 
         response = self.client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="deepseek-chat",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            response_format={"type": "json_object"},
         )
 
         content = response.choices[0].message.content
@@ -75,8 +74,16 @@ class OpenAIAgent:
 
         try:
             data = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Agent 返回非 JSON 响应: {content[:200]}") from exc
+        except json.JSONDecodeError:
+            # DeepSeek 可能用 markdown 代码块包裹 JSON
+            if "```json" in content:
+                json_str = content.split("```json")[1].split("```")[0].strip()
+                data = json.loads(json_str)
+            elif "```" in content:
+                json_str = content.split("```")[1].split("```")[0].strip()
+                data = json.loads(json_str)
+            else:
+                raise ValueError(f"Agent 返回非 JSON 响应: {content[:200]}") from None
 
         return AnalysisPayload(**data)
 

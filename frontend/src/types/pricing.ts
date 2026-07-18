@@ -1,5 +1,6 @@
 export interface QuoteLine {
   work_package_id: string | null
+  work_package_name: string | null
   role: string
   unit_price_cents: number
   half_day_units: number
