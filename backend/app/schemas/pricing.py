@@ -2,13 +2,23 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RoleConfig(BaseModel):
     name: str
     unit_price_cents: int = Field(gt=0)
+    price_floor_cents: int = Field(gt=0, default=0)
+    price_ceiling_cents: int = Field(gt=0, default=0)
     is_required: bool = False
+
+    @model_validator(mode="after")
+    def _fill_price_bounds(self) -> "RoleConfig":
+        if self.price_floor_cents == 0:
+            self.price_floor_cents = max(100, int(self.unit_price_cents * 0.7 / 100) * 100)
+        if self.price_ceiling_cents == 0:
+            self.price_ceiling_cents = int(self.unit_price_cents * 1.3 / 100) * 100
+        return self
 
 
 class WorkPackage(BaseModel):
@@ -25,7 +35,7 @@ class QuoteLine(BaseModel):
     work_package_name: str | None = None
     role: str
     unit_price_cents: int
-    half_day_units: int = Field(ge=1, le=6)
+    half_day_units: int = Field(ge=1, le=7)
 
 
 class QuotePlan(BaseModel):

@@ -10,8 +10,8 @@ def test_current_config_returns_one_plan_when_target_is_reachable():
     service = PricingService()
     plans = service.build_plans(
         target_gross_cents=250_000,
-        roles=[RoleConfig(name="产品", unit_price_cents=80_000, is_required=True)],
-        work_packages=[WorkPackage(id="f1", name="功能1", role_names=["产品"], weight=1)],
+        roles=[RoleConfig(name="产品", unit_price_cents=80_000, price_floor_cents=56_000, price_ceiling_cents=104_000, is_required=True)],
+        work_packages=[WorkPackage(id="f1", name="功能1", role_names=["产品"], weight=5)],
     )
     assert len(plans) == 1
     assert plans[0].kind == "recommended"
@@ -22,7 +22,7 @@ def test_unreachable_current_config_returns_at_most_three_adjusted_plans():
     service = PricingService()
     plans = service.build_plans(
         target_gross_cents=10_000_000,
-        roles=[RoleConfig(name="产品", unit_price_cents=80_000, is_required=True)],
+        roles=[RoleConfig(name="产品", unit_price_cents=80_000, price_floor_cents=56_000, price_ceiling_cents=104_000, is_required=True)],
         work_packages=[WorkPackage(id="f1", name="功能1", role_names=["产品"], weight=1)],
     )
     assert 1 <= len(plans) <= 3

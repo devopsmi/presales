@@ -1,4 +1,4 @@
-"""定价服务 — 目标价分配、组合方案生成、确定性金额计算。"""
+"""定价服务 — 四阶段递进分配：工时 → 价格浮动 → 自动拆分。"""
 
 import uuid
 
@@ -28,8 +28,23 @@ def within_target(gross_cents: int, target_gross_cents: int) -> bool:
     return target_gross_cents * 97 <= gross_cents * 100 <= target_gross_cents * 103
 
 
+def _split_wp(wp: WorkPackage) -> list[WorkPackage]:
+    """将工作包一分为二，按比例分配 weight。"""
+    w1 = max(1, wp.weight // 2)
+    w2 = wp.weight - w1
+    return [
+        WorkPackage(id=f"{wp.id}_s1", name=f"{wp.name}/2", role_names=wp.role_names.copy(), weight=w1),
+        WorkPackage(id=f"{wp.id}_s2", name=f"{wp.name}/2", role_names=wp.role_names.copy(), weight=w2),
+    ]
+
+
+def _max_units_for_weight(weight: int) -> int:
+    """工时上限 = 4 + weight（半天单位）。weight=1→5, weight=5→9。"""
+    return 4 + weight * 1
+
+
 class PricingService:
-    """定价服务 — 实现分配算法和组合方案生成。"""
+    """定价服务 — 四阶段递进分配算法。"""
 
     def build_plans(
         self,
@@ -37,67 +52,87 @@ class PricingService:
         roles: list[RoleConfig],
         work_packages: list[WorkPackage],
     ) -> list[QuotePlan]:
-        """构建报价方案。
+        """四阶段入口：baseline → hours → price → split."""
 
-        若当前配置可行 → 返回 1 个推荐方案。
-        不可行 → 返回最多 3 个调整方案。
-        """
-        recommended = self._allocate_current_config(target_gross_cents, roles, work_packages)
-        if recommended and recommended.within_target:
-            return [recommended]
+        # ── Phase 1+2: 基线分配 + 工时调整 ──
+        plan = self._allocate(target_gross_cents, roles, work_packages)
+        if plan and plan.within_target:
+            return [plan]
 
-        plans: list[QuotePlan] = []
-        if recommended:
-            recommended.kind = "closest"
-            recommended.id = str(uuid.uuid4())
-            recommended.adjustments.append("当前配置无法命中目标价区间")
-            plans.append(recommended)
+        # ── Phase 3: 价格浮动 ──
+        if plan:
+            plan = self._phase3_adjust_prices(plan, target_gross_cents, roles)
+            if plan.within_target:
+                return [plan]
 
-        # 生成调整方案
-        candidates = [
-            self._adjust_days_and_uniform_rate(target_gross_cents, roles, work_packages),
-            self._closest_valid_allocation(target_gross_cents, roles, work_packages),
-        ]
-        plans.extend(p for p in candidates if p is not None)
+        # ── Phase 4: 自动拆分 + 重分配 ──
+        current_wps = list(work_packages)
+        best_plan = plan
 
-        # 排序：先目标内，再调整数少，最后离目标近
-        plans.sort(key=lambda p: (
-            not p.within_target,
-            len(p.adjustments),
-            abs(p.gross_cents - target_gross_cents),
-        ))
-        return plans[:3]
+        for _round in range(5):
+            current_wps.sort(key=lambda wp: wp.weight, reverse=True)
+            if not current_wps or current_wps[0].weight <= 1:
+                break
 
-    def _allocate_current_config(
+            to_split = current_wps.pop(0)
+            current_wps.extend(_split_wp(to_split))
+
+            new_plan = self._allocate(target_gross_cents, roles, current_wps)
+            if new_plan:
+                new_plan = self._phase3_adjust_prices(new_plan, target_gross_cents, roles)
+                adj = f"自动拆分: {to_split.name}"
+                if adj not in new_plan.adjustments:
+                    new_plan.adjustments.append(adj)
+                if new_plan.within_target:
+                    return [new_plan]
+                if best_plan is None or abs(new_plan.gross_cents - target_gross_cents) < abs(
+                    best_plan.gross_cents - target_gross_cents
+                ):
+                    best_plan = new_plan
+
+        return [best_plan] if best_plan else []
+
+    # ------------------------------------------------------------------
+    # Phase 1+2: 核心分配（基线 + 贪心工时调整）
+    # ------------------------------------------------------------------
+
+    def _allocate(
         self,
         target_gross_cents: int,
         roles: list[RoleConfig],
         work_packages: list[WorkPackage],
+        price_overrides: dict[str, int] | None = None,
     ) -> QuotePlan | None:
-        """使用当前角色和单价进行分配。"""
+        """在给定单价下执行分配。"""
         role_map = {r.name: r for r in roles}
-        lines: list[QuoteLine] = []
+        wp_map = {wp.id: wp for wp in work_packages or []}
 
-        for wp in work_packages:
+        def _price(role_name: str) -> int:
+            if price_overrides and role_name in price_overrides:
+                return price_overrides[role_name]
+            r = role_map.get(role_name)
+            return r.unit_price_cents if r else 0
+
+        lines: list[QuoteLine] = []
+        for wp in work_packages or []:
             for role_name in wp.role_names:
-                role = role_map.get(role_name)
-                if not role:
+                if role_name not in role_map:
                     continue
                 lines.append(QuoteLine(
                     work_package_id=wp.id,
                     work_package_name=wp.name,
                     role=role_name,
-                    unit_price_cents=role.unit_price_cents,
-                    half_day_units=1,  # 从 1 开始
+                    unit_price_cents=_price(role_name),
+                    half_day_units=1,
                 ))
 
         if not lines:
             return None
 
-        # 贪心分配：按权重循环增加半天单位
         totals = calculate_totals(lines)
-        max_iterations = 50
-        for _ in range(max_iterations):
+
+        # 贪心递增每个 (role, wp) 对的半天数
+        for _ in range(100):
             if within_target(totals.gross_cents, target_gross_cents):
                 break
             if totals.gross_cents >= target_gross_cents:
@@ -105,14 +140,15 @@ class PricingService:
 
             best_idx = -1
             best_gap = float("inf")
-            for i, line in enumerate(lines):
-                if line.half_day_units >= 6:
+            for i, ln in enumerate(lines):
+                wp = wp_map.get(ln.work_package_id or "")
+                weight = wp.weight if wp else 1
+                if ln.half_day_units >= _max_units_for_weight(weight):
                     continue
-                new_units = line.half_day_units + 1
-                new_cost = half_day_cost(line.unit_price_cents, new_units)
-                old_cost = half_day_cost(line.unit_price_cents, line.half_day_units)
-                delta = new_cost - old_cost
-                new_gross = totals.gross_cents + delta
+                new_units = ln.half_day_units + 1
+                new_cost = half_day_cost(ln.unit_price_cents, new_units)
+                old_cost = half_day_cost(ln.unit_price_cents, ln.half_day_units)
+                new_gross = totals.gross_cents + (new_cost - old_cost)
                 gap = abs(new_gross - target_gross_cents)
                 if gap < best_gap and new_gross <= int(target_gross_cents * 1.03):
                     best_gap = gap
@@ -121,8 +157,7 @@ class PricingService:
             if best_idx == -1:
                 break
 
-            line = lines[best_idx]
-            line.half_day_units += 1
+            lines[best_idx].half_day_units += 1
             totals = calculate_totals(lines)
 
         return QuotePlan(
@@ -136,44 +171,69 @@ class PricingService:
             adjustments=[],
         )
 
-    def _adjust_days_and_uniform_rate(
+    # ------------------------------------------------------------------
+    # Phase 3: 价格浮动
+    # ------------------------------------------------------------------
+
+    def _phase3_adjust_prices(
         self,
+        plan: QuotePlan,
         target_gross_cents: int,
         roles: list[RoleConfig],
-        work_packages: list[WorkPackage],
-    ) -> QuotePlan | None:
-        """方案1：调整工时 + 统一调价。"""
-        plan = self._allocate_current_config(int(target_gross_cents * 0.85), roles, work_packages)
-        if not plan:
-            return None
+    ) -> QuotePlan:
+        """在 [floor, ceiling] 范围内微调角色单价以命中目标。"""
+        role_map = {r.name: r for r in roles}
 
-        # 如果当前价差大，按比例调整单价
-        current = plan.gross_cents
-        if current > 0 and not within_target(current, target_gross_cents):
-            ratio = target_gross_cents / current
-            for line in plan.lines:
-                line.unit_price_cents = max(10_000, int(line.unit_price_cents * ratio / 1000) * 1000)
+        # 当前各角色的实时价格
+        current_prices: dict[str, int] = {}
+        for ln in plan.lines:
+            if ln.role not in current_prices:
+                r = role_map.get(ln.role)
+                current_prices[ln.role] = r.unit_price_cents if r else ln.unit_price_cents
+
+        for _ in range(50):
+            if within_target(plan.gross_cents, target_gross_cents):
+                plan.within_target = True
+                plan.kind = "recommended"
+                if not plan.adjustments or "单价" not in plan.adjustments[-1]:
+                    plan.adjustments.append("根据目标价上浮了角色单价")
+                return plan
+
+            best_role: str | None = None
+            best_gap = float("inf")
+
+            for role_name, cur_price in current_prices.items():
+                r = role_map.get(role_name)
+                if not r:
+                    continue
+                if cur_price >= r.price_ceiling_cents:
+                    continue
+                new_price = min(cur_price + 5000, r.price_ceiling_cents)
+                delta = 0
+                for ln in plan.lines:
+                    if ln.role == role_name:
+                        delta += half_day_cost(new_price, ln.half_day_units) - half_day_cost(cur_price, ln.half_day_units)
+                new_gross = plan.gross_cents + delta
+                gap = abs(new_gross - target_gross_cents)
+                if gap < best_gap:
+                    best_gap = gap
+                    best_role = role_name
+
+            if best_role is None:
+                break
+
+            old_price = current_prices[best_role]
+            new_price = min(old_price + 5000, role_map[best_role].price_ceiling_cents)
+            current_prices[best_role] = new_price
+            for ln in plan.lines:
+                if ln.role == best_role:
+                    ln.unit_price_cents = new_price
+
             totals = calculate_totals(plan.lines)
             plan.labor_cents = totals.labor_cents
             plan.tax_cents = totals.tax_cents
             plan.gross_cents = totals.gross_cents
-            plan.within_target = within_target(totals.gross_cents, target_gross_cents)
-            plan.adjustments.append("按目标价比例统一调整了角色单价")
 
-        plan.kind = "adjusted"
-        plan.id = str(uuid.uuid4())
-        return plan
-
-    def _closest_valid_allocation(
-        self,
-        target_gross_cents: int,
-        roles: list[RoleConfig],
-        work_packages: list[WorkPackage],
-    ) -> QuotePlan | None:
-        """方案2：最接近目标的有效分配。"""
-        plan = self._allocate_current_config(target_gross_cents, roles, work_packages)
-        if plan:
-            plan.kind = "closest"
-            plan.id = str(uuid.uuid4())
-            plan.adjustments.append("当前配置无法命中目标价区间，返回最接近的分配方案")
+        if not any("单价" in a for a in plan.adjustments):
+            plan.adjustments.append("价格调整后仍未命中目标价区间")
         return plan
