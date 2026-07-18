@@ -18,7 +18,7 @@
 
       <el-radio-group v-model="selectedPlanId" style="width: 100%">
         <el-card
-          v-for="plan in plans"
+          v-for="(plan, index) in plans"
           :key="plan.id"
           :class="['plan-card', { selected: selectedPlanId === plan.id }]"
           shadow="hover"
@@ -63,7 +63,12 @@
           </el-descriptions>
 
           <!-- 明细表格 -->
-          <el-table :data="plan.lines" style="width: 100%; margin-top: 12px" size="small">
+          <el-table
+            :data="plan.lines"
+            :span-method="spanMethods[index]"
+            style="width: 100%; margin-top: 12px"
+            size="small"
+          >
             <el-table-column label="功能" min-width="160">
               <template #default="{ row }">
                 {{ row.work_package_name || row.work_package_id || '-' }}
@@ -106,9 +111,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { QuotePlan } from '@/types/pricing'
+import type { QuotePlan, QuoteLine } from '@/types/pricing'
 
 const props = defineProps<{
   plans: QuotePlan[]
@@ -137,6 +142,38 @@ function planLabel(plan: QuotePlan): string {
 function formatCents(cents: number): string {
   return (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
+
+/** 为 el-table 生成合并单元格方法 — 合并相同 work_package_name 的"功能"列 */
+function createSpanMethod(lines: QuoteLine[]) {
+  // 找出连续相同 work_package_name 的分组
+  const groups: Record<number, number> = {}
+  let start = 0
+  const key = (i: number) => lines[i]?.work_package_name ?? lines[i]?.work_package_id ?? '-'
+  for (let i = 1; i <= lines.length; i++) {
+    if (i === lines.length || key(i) !== key(start)) {
+      if (i - start > 1) groups[start] = i - start
+      start = i
+    }
+  }
+
+  return ({ rowIndex, columnIndex }: { rowIndex: number; columnIndex: number }) => {
+    // 检查当前行是否被上方合并隐藏
+    const hidden = Object.entries(groups).some(([s, count]) => {
+      const si = parseInt(s)
+      return rowIndex > si && rowIndex < si + count
+    })
+    if (hidden) return { rowspan: 0, colspan: 0 }
+
+    if (columnIndex === 0 && groups[rowIndex]) {
+      return { rowspan: groups[rowIndex], colspan: 1 }
+    }
+    return { rowspan: 1, colspan: 1 }
+  }
+}
+
+const spanMethods = computed(() =>
+  props.plans.map(plan => createSpanMethod(plan.lines))
+)
 
 async function handleConfirm() {
   if (!selectedPlanId.value || !props.runId) return

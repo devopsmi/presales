@@ -38,6 +38,12 @@
           <span v-else>{{ row.feature }}</span>
         </template>
       </el-table-column>
+      <el-table-column prop="subfeature" label="子功能" width="140">
+        <template #default="{ row }">
+          <el-input v-model="row.subfeature" size="small" v-if="!readonly" />
+          <span v-else>{{ row.subfeature }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="description" label="描述" min-width="200">
         <template #default="{ row }">
           <el-input v-model="row.description" type="textarea" :rows="2" size="small" v-if="!readonly" />

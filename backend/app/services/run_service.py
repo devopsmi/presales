@@ -10,6 +10,14 @@ from app.services.agent_gateway import AgentGateway
 from app.services.pricing_service import PricingService
 
 
+def _build_wp_name(module: str, feature: str, subfeature: str | None) -> str:
+    """构建三级工作包名称：模块·功能·子功能"""
+    base = f"{module}·{feature}"
+    if subfeature:
+        return f"{base}·{subfeature}"
+    return base
+
+
 class RunService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -105,7 +113,7 @@ class RunService:
             work_packages = [
                 WorkPackage(
                     id=req["id"],
-                    name=req.get("module", "") + "·" + req["feature"],
+                    name=_build_wp_name(req.get("module", ""), req.get("feature", ""), req.get("subfeature")),
                     role_names=req.get("suggested_roles", []) or [],
                     weight=req.get("complexity_weight", 3),
                 )
