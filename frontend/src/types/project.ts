@@ -2,6 +2,8 @@
 export interface RoleConfig {
   name: string
   unit_price_cents: number
+  price_floor_cents: number
+  price_ceiling_cents: number
   is_required: boolean
 }
 

@@ -38,6 +38,13 @@
             </el-tag>
           </el-radio>
 
+          <!-- 调整标签 -->
+          <div v-if="plan.adjustments.length > 0 || totalHalfDays(plan) > 1" style="margin-bottom: 8px; display: flex; gap: 6px; flex-wrap: wrap">
+            <el-tag v-if="hasPriceAdjustment(plan)" type="warning" size="small" effect="plain">价格上浮</el-tag>
+            <el-tag v-if="hasSplitAdjustment(plan)" type="info" size="small" effect="plain">功能拆分</el-tag>
+            <el-tag v-if="totalHalfDays(plan) > 1" type="" size="small" effect="plain">工时调整</el-tag>
+          </div>
+
           <!-- 调整说明 -->
           <el-alert
             v-for="(adj, i) in plan.adjustments"
@@ -141,6 +148,18 @@ function planLabel(plan: QuotePlan): string {
 
 function formatCents(cents: number): string {
   return (cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function hasPriceAdjustment(plan: QuotePlan): boolean {
+  return plan.adjustments.some(a => a.includes('单价'))
+}
+
+function hasSplitAdjustment(plan: QuotePlan): boolean {
+  return plan.adjustments.some(a => a.includes('拆分'))
+}
+
+function totalHalfDays(plan: QuotePlan): number {
+  return plan.lines.reduce((s, l) => s + l.half_day_units, 0)
 }
 
 /** 为 el-table 生成合并单元格方法 — 合并相同 work_package_name 的"功能"列 */

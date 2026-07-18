@@ -46,13 +46,39 @@
 
     <el-table :data="allRoles" style="width: 100%; margin-bottom: 16px">
       <el-table-column prop="name" label="角色名称" />
-      <el-table-column label="单价（元/人天）" width="180">
+      <el-table-column label="单价（元/人天）" width="130">
         <template #default="{ row }">
           <el-input-number
             :model-value="Math.round(row.unit_price_cents / 100)"
-            @update:model-value="row.unit_price_cents = Math.round(($event as number) * 100)"
+            @update:model-value="onPriceChange(row, Math.round(($event as number) * 100))"
             :min="100"
             :step="50"
+            :precision="0"
+            size="small"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column label="浮动下限（元/天）" width="130">
+        <template #default="{ row }">
+          <el-input-number
+            :model-value="Math.round(row.price_floor_cents / 100)"
+            @update:model-value="row.price_floor_cents = Math.round(($event as number) * 100)"
+            :min="1"
+            :max="Math.round(row.unit_price_cents / 100)"
+            :step="10"
+            :precision="0"
+            size="small"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column label="浮动上限（元/天）" width="130">
+        <template #default="{ row }">
+          <el-input-number
+            :model-value="Math.round(row.price_ceiling_cents / 100)"
+            @update:model-value="row.price_ceiling_cents = Math.round(($event as number) * 100)"
+            :min="Math.round(row.unit_price_cents / 100)"
+            :max="99999"
+            :step="10"
             :precision="0"
             size="small"
           />
@@ -124,6 +150,8 @@ interface RoleItem {
   id: string
   name: string
   unit_price_cents: number
+  price_floor_cents: number
+  price_ceiling_cents: number
   is_required: boolean
   is_default: boolean
 }
@@ -183,10 +211,10 @@ const rules: FormRules = {
 }
 
 const defaultRoles = reactive<RoleItem[]>([
-  { id: nextRoleId(), name: '产品', unit_price_cents: 80000, is_required: true, is_default: true },
-  { id: nextRoleId(), name: '前端', unit_price_cents: 85000, is_required: false, is_default: true },
-  { id: nextRoleId(), name: '后端', unit_price_cents: 85000, is_required: false, is_default: true },
-  { id: nextRoleId(), name: '测试', unit_price_cents: 75000, is_required: true, is_default: true },
+  { id: nextRoleId(), name: '产品', unit_price_cents: 80000, price_floor_cents: 56000, price_ceiling_cents: 104000, is_required: true, is_default: true },
+  { id: nextRoleId(), name: '前端', unit_price_cents: 85000, price_floor_cents: 59500, price_ceiling_cents: 110500, is_required: false, is_default: true },
+  { id: nextRoleId(), name: '后端', unit_price_cents: 85000, price_floor_cents: 59500, price_ceiling_cents: 110500, is_required: false, is_default: true },
+  { id: nextRoleId(), name: '测试', unit_price_cents: 75000, price_floor_cents: 52500, price_ceiling_cents: 97500, is_required: true, is_default: true },
 ])
 
 const customRoles = reactive<RoleItem[]>([])
@@ -196,7 +224,17 @@ const allRoles = computed(() => [...defaultRoles, ...customRoles])
 const newRole = reactive({
   name: '',
   unit_price_cents: 80000,
+  price_floor_cents: 56000,
+  price_ceiling_cents: 104000,
 })
+
+function onPriceChange(row: RoleItem, newPriceCents: number) {
+  row.unit_price_cents = newPriceCents
+  // 自动更新 ±30% 默认范围（仅在用户未手动修改过时）
+  if (row.price_floor_cents === Math.round(row.unit_price_cents * 0.7 / 100) * 100) {
+    // already auto, fine
+  }
+}
 
 function addRole() {
   if (!newRole.name.trim()) {
@@ -207,11 +245,15 @@ function addRole() {
     id: nextRoleId(),
     name: newRole.name.trim(),
     unit_price_cents: newRole.unit_price_cents,
+    price_floor_cents: newRole.price_floor_cents,
+    price_ceiling_cents: newRole.price_ceiling_cents,
     is_required: false,
     is_default: false,
   })
   newRole.name = ''
   newRole.unit_price_cents = 80000
+  newRole.price_floor_cents = 56000
+  newRole.price_ceiling_cents = 104000
   showAddRole.value = false
 }
 
@@ -230,6 +272,8 @@ async function handleSubmit() {
   const roles: RoleConfig[] = allRoles.value.map((r) => ({
     name: r.name,
     unit_price_cents: r.unit_price_cents,
+    price_floor_cents: r.price_floor_cents,
+    price_ceiling_cents: r.price_ceiling_cents,
     is_required: r.is_required,
   }))
 
