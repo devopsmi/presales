@@ -150,7 +150,7 @@ def select_scenario(
 
     project.selected_run_id = body.run_id
     project.selected_scenario_id = body.scenario_id
-    project.stage = ProjectStage.QUOTE_READY.value
+    project.stage = ProjectStage.COMPLETED.value
     db.commit()
     db.refresh(project)
     return {

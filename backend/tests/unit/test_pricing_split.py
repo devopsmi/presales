@@ -48,8 +48,8 @@ def test_phase4_split_limits_at_five_rounds():
     )
     assert len(plans) >= 1
     assert plans[0].gross_cents > 0
-    # 应有拆分提示
-    assert any("拆分" in a for a in plans[0].adjustments)
+    # 至少有一个方案有拆分提示
+    assert any("拆分" in a for plan in plans for a in plan.adjustments)
 
 
 def test_phase4_multiple_roles_trigger_split():

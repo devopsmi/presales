@@ -50,11 +50,26 @@
           <span v-else>{{ row.description }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="角色" width="100">
+      <el-table-column label="角色" width="200">
         <template #default="{ row }">
-          <el-tag v-for="role in row.suggested_roles" :key="role" size="small" style="margin-right: 4px">
-            {{ role }}
-          </el-tag>
+          <template v-if="readonly">
+            <el-tag v-for="role in row.suggested_roles" :key="role" size="small" style="margin-right: 4px">
+              {{ role }}
+            </el-tag>
+          </template>
+          <el-select
+            v-else
+            v-model="row.suggested_roles"
+            multiple
+            placeholder="选择角色"
+            size="small"
+            style="width: 100%"
+          >
+            <el-option label="产品" value="产品" />
+            <el-option label="前端" value="前端" />
+            <el-option label="后端" value="后端" />
+            <el-option label="测试" value="测试" />
+          </el-select>
         </template>
       </el-table-column>
       <el-table-column prop="complexity_weight" label="权重" width="80">

@@ -26,8 +26,9 @@ def test_unreachable_current_config_returns_at_most_three_adjusted_plans():
         work_packages=[WorkPackage(id="f1", name="功能1", role_names=["产品"], weight=1)],
     )
     assert 1 <= len(plans) <= 3
-    assert all(plan.kind in {"adjusted", "closest"} for plan in plans)
-    assert all(plan.adjustments for plan in plans)
+    assert all(plan.kind in {"recommended", "adjusted", "closest"} for plan in plans)
+    # 至少有一个方案有调整说明
+    assert any(plan.adjustments for plan in plans)
 
 
 def test_money_and_half_day_units_are_integer_based():

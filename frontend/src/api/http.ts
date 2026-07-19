@@ -50,4 +50,24 @@ export const http = {
   delete<T>(path: string): Promise<T> {
     return request<T>(path, { method: 'DELETE' })
   },
+
+  /** 下载 blob（文件导出） */
+  async downloadBlob(path: string, filename?: string): Promise<void> {
+    const response = await fetch(`${BASE_URL}${path}`, {
+      method: 'GET',
+    })
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '')
+      throw new Error(`HTTP ${response.status}: ${errorBody || response.statusText}`)
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || path.split('/').pop() || 'download'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  },
 }

@@ -1,11 +1,17 @@
 """项目 API 路由 — 通过 ProjectService 操作。"""
 
+import io
+import re
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectResponse, ProjectUpdate
 from app.services.project_service import ProjectService
+from app.services.quote_export_service import QuoteExportService
 
 router = APIRouter()
 
@@ -79,3 +85,32 @@ def delete_project(project_id: str, db: Session = Depends(get_db)):
     svc = ProjectService(db)
     if not svc.delete(project_id):
         raise HTTPException(status_code=404, detail="项目不存在")
+
+
+@router.get("/{project_id}/export-quote")
+def export_quote(project_id: str, db: Session = Depends(get_db)):
+    """导出已选方案的报价单为 Excel 文件。"""
+    # 先获取项目名称用于文件名
+    proj_svc = ProjectService(db)
+    project = proj_svc.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    svc = QuoteExportService(db)
+    try:
+        excel_bytes = svc.export_selected_plan(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    name_part = project.name or project_id[:8]
+    ascii_name = re.sub(r'[^\x00-\x7F]', '_', name_part)  # 中文替换为下划线
+    filename = f"quote_{ascii_name}.xlsx"
+    # RFC 5987 编码中文文件名用于 Content-Disposition
+    encoded_name = quote(name_part.encode('utf-8'))
+    return StreamingResponse(
+        io.BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}",
+        },
+    )

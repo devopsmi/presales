@@ -66,9 +66,12 @@
         @selected="onScenarioSelected"
       />
 
-      <div v-if="activeStep === 3" style="text-align: center; padding: 40px; color: #999">
-        文件导出（待 Task 4 实现）
-      </div>
+      <QuoteExportStep
+        v-if="activeStep === 3 && selectedPlan && project"
+        :project="project"
+        :plan="selectedPlan"
+        @back="onBackToPricing"
+      />
     </template>
 
     <el-dialog v-model="showEdit" title="编辑项目" width="500px">
@@ -105,6 +108,7 @@ import ProjectForm from '@/components/ProjectForm.vue'
 import ProjectSetupStep from '@/components/ProjectSetupStep.vue'
 import RequirementDraftEditor from '@/components/RequirementDraftEditor.vue'
 import PricingStep from '@/components/PricingStep.vue'
+import QuoteExportStep from '@/components/QuoteExportStep.vue'
 import type { Project, ProjectCreate } from '@/types/project'
 import type { RunResponse } from '@/types/run'
 import type { QuotePlan } from '@/types/pricing'
@@ -122,6 +126,11 @@ const pricingLoading = ref(false)
 const pricingRunId = ref<string | null>(null)
 
 const isCreating = computed(() => route.params.id === 'new')
+
+const selectedPlan = computed(() => {
+  if (!project.value || !pricingPlans.value.length) return null
+  return pricingPlans.value.find(p => p.id === project.value!.selected_scenario_id) || pricingPlans.value[0]
+})
 
 const editForm = reactive({
   name: '',
@@ -263,6 +272,10 @@ async function onScenarioSelected(planId: string, runId: string) {
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '方案确认失败')
   }
+}
+
+function onBackToPricing() {
+  activeStep.value = 2
 }
 
 onMounted(loadProject)

@@ -176,13 +176,12 @@ function createSpanMethod(lines: QuoteLine[]) {
   }
 
   return ({ rowIndex, columnIndex }: { rowIndex: number; columnIndex: number }) => {
-    // 检查当前行是否被上方合并隐藏
     const hidden = Object.entries(groups).some(([s, count]) => {
       const si = parseInt(s)
       return rowIndex > si && rowIndex < si + count
     })
-    if (hidden) return { rowspan: 0, colspan: 0 }
-
+    // 只对被合并的行的第 0 列（功能）隐藏，其它列正常显示
+    if (hidden && columnIndex === 0) return { rowspan: 0, colspan: 0 }
     if (columnIndex === 0 && groups[rowIndex]) {
       return { rowspan: groups[rowIndex], colspan: 1 }
     }

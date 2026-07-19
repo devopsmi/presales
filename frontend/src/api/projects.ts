@@ -20,3 +20,8 @@ export function updateProject(id: string, data: ProjectUpdate): Promise<Project>
 export function deleteProject(id: string): Promise<void> {
   return http.delete(`/api/v1/projects/${id}`)
 }
+
+export function exportQuote(projectId: string, projectName?: string): Promise<void> {
+  const filename = `报价单_${projectName || projectId.slice(0, 8)}.xlsx`
+  return http.downloadBlob(`/api/v1/projects/${projectId}/export-quote`, filename)
+}

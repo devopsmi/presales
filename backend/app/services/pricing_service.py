@@ -52,22 +52,27 @@ class PricingService:
         roles: list[RoleConfig],
         work_packages: list[WorkPackage],
     ) -> list[QuotePlan]:
-        """四阶段入口：baseline → hours → price → split."""
+        """四阶段入口：baseline → hours → price → split. 始终返回最多3个方案。"""
 
         # ── Phase 1+2: 基线分配 + 工时调整 ──
-        plan = self._allocate(target_gross_cents, roles, work_packages)
-        if plan and plan.within_target:
-            return [plan]
+        primary = self._allocate(target_gross_cents, roles, work_packages)
+        if not primary:
+            return []
 
-        # ── Phase 3: 价格浮动 ──
-        if plan:
-            plan = self._phase3_adjust_prices(plan, target_gross_cents, roles)
-            if plan.within_target:
-                return [plan]
+        plans: list[QuotePlan] = [primary]
 
-        # ── Phase 4: 自动拆分 + 重分配 ──
+        # ── Phase 3: 价格浮动 — 作为备选方案 ──
+        alt3 = self._allocate(target_gross_cents, roles, work_packages)
+        if alt3:
+            alt3 = self._phase3_adjust_prices(alt3, target_gross_cents, roles)
+            if alt3.gross_cents != primary.gross_cents:
+                alt3.kind = "adjusted"
+                alt3.id = str(uuid.uuid4())
+                plans.append(alt3)
+
+        # ── Phase 4: 自动拆分 + 重分配 — 作为备选 ──
         current_wps = list(work_packages)
-        best_plan = plan
+        best_plan = primary
 
         for _round in range(5):
             current_wps.sort(key=lambda wp: wp.weight, reverse=True)
@@ -83,14 +88,37 @@ class PricingService:
                 adj = f"自动拆分: {to_split.name}"
                 if adj not in new_plan.adjustments:
                     new_plan.adjustments.append(adj)
-                if new_plan.within_target:
-                    return [new_plan]
-                if best_plan is None or abs(new_plan.gross_cents - target_gross_cents) < abs(
+                if new_plan.within_target and all(
+                    abs(new_plan.gross_cents - p.gross_cents) > 1000 for p in plans
+                ):
+                    new_plan.kind = "adjusted"
+                    new_plan.id = str(uuid.uuid4())
+                    plans.append(new_plan)
+                if abs(new_plan.gross_cents - target_gross_cents) < abs(
                     best_plan.gross_cents - target_gross_cents
                 ):
                     best_plan = new_plan
 
-        return [best_plan] if best_plan else []
+        # 去重 + 排序 + 最多返回3个
+        seen_gross: set[int] = set()
+        deduped: list[QuotePlan] = []
+        for p in plans:
+            if p.gross_cents not in seen_gross:
+                seen_gross.add(p.gross_cents)
+                deduped.append(p)
+        deduped.sort(key=lambda p: (
+            not p.within_target,
+            len(p.adjustments),
+            abs(p.gross_cents - target_gross_cents),
+        ))
+
+        # 如果没有任何方案达标，把 best_plan 也加入
+        if deduped and not any(p.within_target for p in deduped) and best_plan and best_plan not in deduped:
+            best_plan.kind = "closest"
+            best_plan.id = str(uuid.uuid4())
+            deduped.append(best_plan)
+
+        return deduped[:3]
 
     # ------------------------------------------------------------------
     # Phase 1+2: 核心分配（基线 + 贪心工时调整）
@@ -131,11 +159,9 @@ class PricingService:
 
         totals = calculate_totals(lines)
 
-        # 贪心递增每个 (role, wp) 对的半天数
+        # 贪心分配：始终找最接近目标的分配，不设早期退出
         for _ in range(100):
             if within_target(totals.gross_cents, target_gross_cents):
-                break
-            if totals.gross_cents >= target_gross_cents:
                 break
 
             best_idx = -1
@@ -150,7 +176,7 @@ class PricingService:
                 old_cost = half_day_cost(ln.unit_price_cents, ln.half_day_units)
                 new_gross = totals.gross_cents + (new_cost - old_cost)
                 gap = abs(new_gross - target_gross_cents)
-                if gap < best_gap and new_gross <= int(target_gross_cents * 1.03):
+                if gap < best_gap:
                     best_gap = gap
                     best_idx = i
 

@@ -118,7 +118,7 @@ def test_select_scenario_updates_project(client, project_with_confirmed_draft):
     )
     assert put.status_code == 200
     updated = client.get(f"/api/v1/projects/{proj['id']}").json()
-    assert updated["stage"] == "quote_ready"
+    assert updated["stage"] == "completed"
     assert updated["selected_run_id"] == run["id"]
     assert updated["selected_scenario_id"] == plan_id
 
