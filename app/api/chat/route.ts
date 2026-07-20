@@ -1,6 +1,9 @@
 import type { UIMessage } from "ai";
-import { createPipeline } from "@/lib/agent/pipeline";
+import { streamPipeline } from "@/lib/agent/pipeline";
+import type { PipelineInput } from "@/lib/agent/pipeline";
+import { resolveLlm } from "@/lib/agent/llm";
 import type { TradeRole } from "@/lib/constants";
+import log from "@/lib/logger";
 
 export const runtime = "nodejs";
 
@@ -40,6 +43,7 @@ function extractTextFromParts(parts: unknown): string {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
+    log.info("Chat API request received");
     const messages: UIMessage[] = body.messages ?? [];
     const lastUserMsg = [...messages].reverse().find((m: UIMessage) => m.role === "user");
 
@@ -64,43 +68,25 @@ export async function POST(req: Request) {
     const modelProvider = config.model ?? "deepseek-v3";
     const llmProvider = (process.env.LLM_PROVIDER === "openai" ? "openai" : "mock") as "mock" | "openai";
 
-    const pipeline = createPipeline({
+    const runLlm = resolveLlm(llmProvider);
+
+    const pipelineInput: PipelineInput = {
       rawText: cleanText,
       attachments: [],
       selectedTrades,
       budgetRange,
       modelProvider,
       llmProvider,
-    });
+    };
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        const msgId = `msg-${Date.now()}`;
         try {
-          for await (const event of pipeline) {
-            let text: string | null = null;
-            switch (event.type) {
-              case "agent_start":
-                text = `\n\n### ${event.agent} 开始工作...\n\n`;
-                break;
-              case "agent_progress":
-                text = `> ${event.message}\n`;
-                break;
-              case "agent_complete":
-                text = `\n${event.agent} 完成。\n`;
-                break;
-              case "pipeline_complete":
-                text = `\n\n__QUOTATION__${JSON.stringify(event.quotation)}__END_QUOTATION__\n`;
-                break;
-            }
-            if (text !== null) {
-              const chunk = JSON.stringify({ type: "text-delta", textDelta: text, id: msgId });
-              controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
-            }
+          for await (const msg of streamPipeline(pipelineInput, runLlm)) {
+            const chunk = JSON.stringify(msg);
+            controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
           }
-          const finish = JSON.stringify({ type: "finish", finishReason: "stop" });
-          controller.enqueue(encoder.encode(`data: ${finish}\n\n`));
           controller.close();
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : "Unknown error";
@@ -115,6 +101,7 @@ export async function POST(req: Request) {
       },
     });
 
+    log.info("Chat API request complete");
     return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
@@ -123,7 +110,7 @@ export async function POST(req: Request) {
       },
     });
   } catch (err) {
-    console.error("Chat API error:", err);
+    log.error("Chat API error", {error: err instanceof Error ? err : new Error(String(err))});
     return new Response(
       JSON.stringify({ error: err instanceof Error ? err.message : "Internal error" }),
       { status: 500, headers: { "Content-Type": "application/json" } },

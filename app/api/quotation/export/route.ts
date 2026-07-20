@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { generateQuotationXlsx } from "@/lib/agent/tools/xlsx-generator";
 import type { QuotationRow, QuotationHeader } from "@/lib/agent/state";
 import type { TradeRole } from "@/lib/constants";
+import log from "@/lib/logger";
 
 export const runtime = "nodejs";
 
@@ -11,6 +12,7 @@ export async function POST(req: NextRequest) {
     const rows: QuotationRow[] = body.rows ?? [];
     const header: QuotationHeader = body.header ?? {};
     const trades: TradeRole[] = body.trades ?? [];
+    log.info("Export request received", { rowCount: rows.length });
 
     if (!rows.length) {
       return NextResponse.json({ error: "No rows provided" }, { status: 400 });
@@ -25,7 +27,7 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err) {
-    console.error("Export error:", err);
+    log.error("Export error", {error: err instanceof Error ? err : new Error(String(err))});
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Export failed" },
       { status: 500 }

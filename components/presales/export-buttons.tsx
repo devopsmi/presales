@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { QuotationRow, QuotationHeader } from "@/lib/agent/state";
 import type { TradeRole } from "@/lib/constants";
 import { useState } from "react";
+import log from "@/lib/logger";
 
 interface ExportButtonsProps {
   rows: QuotationRow[];
@@ -33,7 +34,7 @@ export function ExportButtons({ rows, header, trades }: ExportButtonsProps) {
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      console.error("Export failed:", err);
+      log.error("Export failed", {error: err instanceof Error ? err : new Error(String(err))});
     } finally {
       setDownloading(false);
     }

@@ -1,52 +1,66 @@
-import type { PipelineState, PipelineEvent, QuotationHeader } from "@/lib/agent/state";
+import log from "@/lib/logger";
+import type { LangGraphRunnableConfig } from "@langchain/langgraph";
+import type { RunLlmFn } from "@/lib/agent/llm";
+import type { GraphState } from "@/lib/agent/state";
+import type { QuotationHeader } from "@/lib/agent/state";
+import type { PipelineState } from "@/lib/agent/state";
 import { VENDOR_NAME } from "@/lib/constants";
 
-/**
- * Quoter node: generates the quotation header, computes cost summaries,
- * and produces budget advice from filled-in rows.
- *
- * Yields agent_start / agent_progress / agent_complete events,
- * and returns { quotationFile: null, customerName, projectName }.
- */
-export async function* runQuoterNode(
-  state: PipelineState,
-  runLlm: (params: {
-    systemPrompt: string;
-    userPrompt: string;
-    agentName: string;
-    state: PipelineState;
-  }) => Promise<string>,
-): AsyncGenerator<PipelineEvent, Partial<PipelineState>> {
-  yield { type: "agent_start", agent: "quoter" };
+const quoterLog = log.child({ agent: "quoter" });
+
+export async function quoterNode(
+  state: GraphState,
+  config?: LangGraphRunnableConfig,
+): Promise<Partial<GraphState>> {
+  const runLlm = config?.configurable?.runLlm as RunLlmFn;
+
+  quoterLog.info("starting");
+  const startTime = Date.now();
+
+  config?.writer?.({ type: "agent_start", agent: "quoter" });
 
   if (state.rows.length === 0) {
-    yield {
+    config?.writer?.({
       type: "agent_complete",
       agent: "quoter",
       output: { message: "无报价数据，跳过报价生成" },
-    };
+    });
+    quoterLog.info("skipped (no rows)", { elapsedMs: Date.now() - startTime });
     return { quotationFile: null };
   }
 
   const systemPrompt = buildQuoterSystemPrompt();
   const userPrompt = buildQuoterUserPrompt(state);
 
-  yield {
+  config?.writer?.({
     type: "agent_progress",
     agent: "quoter",
     message: "正在汇总报价数据，生成报价单头部...",
-  };
-
-  const output = await runLlm({
-    systemPrompt,
-    userPrompt,
-    agentName: "quoter",
-    state,
   });
 
-  const header = parseQuotationHeader(output, state);
+  const pipelineState = state as unknown as PipelineState;
 
-  yield {
+  let output: string;
+  try {
+    output = await runLlm({
+      systemPrompt,
+      userPrompt,
+      agentName: "quoter",
+      state: pipelineState,
+    });
+  } catch (err) {
+    quoterLog.error("LLM call failed", { error: err as Error });
+    throw err;
+  }
+
+  const header = parseQuotationHeader(output, pipelineState);
+
+  const quotationJson = JSON.stringify({ header, rows: state.rows });
+
+  const elapsed = Date.now() - startTime;
+  quoterLog.info("complete", { customerName: header.customerName, projectName: header.projectName, quoteDate: header.quoteDate, elapsedMs: elapsed });
+
+  config?.writer?.({
     type: "agent_complete",
     agent: "quoter",
     output: {
@@ -54,15 +68,16 @@ export async function* runQuoterNode(
       projectName: header.projectName,
       quoteDate: header.quoteDate,
     },
-  };
+  });
 
-  yield {
+  config?.writer?.({
     type: "pipeline_complete",
     quotation: { header, rows: state.rows },
-  };
+  });
 
   return {
     quotationFile: null,
+    quotationJson,
     customerName: header.customerName,
     projectName: header.projectName,
   };
@@ -85,7 +100,7 @@ function buildQuoterSystemPrompt(): string {
 只输出纯 JSON，不要包含其他文字。`;
 }
 
-function buildQuoterUserPrompt(state: PipelineState): string {
+function buildQuoterUserPrompt(state: GraphState): string {
   const rowsJson = JSON.stringify(state.rows, null, 2);
 
   return `客户名称：${state.customerName || "未指定"}

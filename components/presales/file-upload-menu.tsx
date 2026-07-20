@@ -65,7 +65,7 @@ export function FileUploadMenu() {
 
       <DropdownMenu>
         <DropdownMenuTrigger>
-          <button className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
+          <span className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer">
             <Paperclip className="size-4" />
             <span>上传文件</span>
             {attachments.length > 0 && (
@@ -73,7 +73,7 @@ export function FileUploadMenu() {
                 {attachments.length}
               </Badge>
             )}
-          </button>
+          </span>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-48">
           <DropdownMenuItem onClick={() => pdfRef.current?.click()}>

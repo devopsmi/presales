@@ -1,61 +1,70 @@
-import type { PipelineState, PipelineEvent, QuotationRow } from "@/lib/agent/state";
-import type { TradeRole } from "@/lib/constants";
+import log from "@/lib/logger";
+import type { LangGraphRunnableConfig } from "@langchain/langgraph";
+import type { RunLlmFn } from "@/lib/agent/llm";
+import type { GraphState } from "@/lib/agent/state";
+import type { QuotationRow } from "@/lib/agent/state";
+import type { PipelineState } from "@/lib/agent/state";
 
-/**
- * Estimator node: fills man-day estimates (trades) for each quotation row.
- *
- * Input: state.rows (from decomposer) + state.selectedTrades
- * Output: updated rows with trades field populated.
- *
- * Yields agent_start / agent_progress / agent_complete events,
- * and returns { rows: QuotationRow[] }.
- */
-export async function* runEstimatorNode(
-  state: PipelineState,
-  runLlm: (params: {
-    systemPrompt: string;
-    userPrompt: string;
-    agentName: string;
-    state: PipelineState;
-  }) => Promise<string>,
-): AsyncGenerator<PipelineEvent, Partial<PipelineState>> {
-  yield { type: "agent_start", agent: "estimator" };
+const estimatorLog = log.child({ agent: "estimator" });
+
+export async function estimatorNode(
+  state: GraphState,
+  config?: LangGraphRunnableConfig,
+): Promise<Partial<GraphState>> {
+  const runLlm = config?.configurable?.runLlm as RunLlmFn;
+
+  estimatorLog.info("starting", { rowCount: state.rows.length, selectedTrades: state.selectedTrades });
+  const startTime = Date.now();
+
+  config?.writer?.({ type: "agent_start", agent: "estimator" });
 
   if (state.rows.length === 0) {
-    yield {
+    config?.writer?.({
       type: "agent_complete",
       agent: "estimator",
       output: { rowCount: 0, message: "无功能清单行，跳过估时" },
-    };
+    });
+    estimatorLog.info("skipped (no rows)", { elapsedMs: Date.now() - startTime });
     return { rows: [] };
   }
 
   const systemPrompt = buildEstimatorSystemPrompt();
   const userPrompt = buildEstimatorUserPrompt(state);
 
-  yield {
+  config?.writer?.({
     type: "agent_progress",
     agent: "estimator",
     message: `正在为 ${state.rows.length} 个功能项估算人天，工种：${state.selectedTrades.join(", ")}...`,
-  };
-
-  const output = await runLlm({
-    systemPrompt,
-    userPrompt,
-    agentName: "estimator",
-    state,
   });
+
+  const pipelineState = state as unknown as PipelineState;
+
+  let output: string;
+  try {
+    output = await runLlm({
+      systemPrompt,
+      userPrompt,
+      agentName: "estimator",
+      state: pipelineState,
+    });
+  } catch (err) {
+    estimatorLog.error("LLM call failed", { error: err as Error });
+    throw err;
+  }
 
   const rows = parseEstimatedRows(output);
 
-  yield {
+  const elapsed = Date.now() - startTime;
+  estimatorLog.info("complete", { estimatedRowCount: rows.length, elapsedMs: elapsed });
+
+  config?.writer?.({
     type: "agent_complete",
     agent: "estimator",
     output: {
       rowCount: rows.length,
       estimatedTrades: countEstimatedTrades(rows),
     },
-  };
+  });
 
   return { rows };
 }
@@ -73,7 +82,7 @@ function buildEstimatorSystemPrompt(): string {
 只输出纯 JSON 数组，不要包含其他文字。`;
 }
 
-function buildEstimatorUserPrompt(state: PipelineState): string {
+function buildEstimatorUserPrompt(state: GraphState): string {
   const rowsJson = JSON.stringify(state.rows, null, 2);
 
   return `客户选择的工种：${state.selectedTrades.join(", ")}

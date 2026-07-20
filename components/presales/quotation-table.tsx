@@ -35,7 +35,7 @@ export function QuotationTable({ rows, trades }: QuotationTableProps) {
 
   return (
     <div className="overflow-x-auto">
-      <Table>
+      <Table className=" scrollbar-none">
         <TableHeader>
           <TableRow>
             {fixedHeaders.map((h, i) => (

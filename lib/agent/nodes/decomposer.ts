@@ -1,48 +1,57 @@
-import type { PipelineState, PipelineEvent, QuotationRow } from "@/lib/agent/state";
+import log from "@/lib/logger";
+import type { LangGraphRunnableConfig } from "@langchain/langgraph";
+import type { RunLlmFn } from "@/lib/agent/llm";
+import type { GraphState } from "@/lib/agent/state";
+import type { QuotationRow } from "@/lib/agent/state";
+import type { PipelineState } from "@/lib/agent/state";
 
-/**
- * Decomposer node: takes structuredBrief and breaks it into quotation rows.
- *
- * Each row has seq, module, sub_module, function, sub_function, description,
- * category ("design"|"feature"), and empty trades + remark.
- *
- * Yields agent_start / agent_progress / agent_complete events,
- * and returns { rows: QuotationRow[] }.
- */
-export async function* runDecomposerNode(
-  state: PipelineState,
-  runLlm: (params: {
-    systemPrompt: string;
-    userPrompt: string;
-    agentName: string;
-    state: PipelineState;
-  }) => Promise<string>,
-): AsyncGenerator<PipelineEvent, Partial<PipelineState>> {
-  yield { type: "agent_start", agent: "decomposer" };
+const decomposerLog = log.child({ agent: "decomposer" });
+
+export async function decomposerNode(
+  state: GraphState,
+  config?: LangGraphRunnableConfig,
+): Promise<Partial<GraphState>> {
+  const runLlm = config?.configurable?.runLlm as RunLlmFn;
+
+  decomposerLog.info("starting");
+  const startTime = Date.now();
+
+  config?.writer?.({ type: "agent_start", agent: "decomposer" });
 
   const systemPrompt = buildDecomposerSystemPrompt();
   const userPrompt = buildDecomposerUserPrompt(state);
 
-  yield {
+  config?.writer?.({
     type: "agent_progress",
     agent: "decomposer",
     message: "正在拆解功能清单，生成报价明细项...",
-  };
-
-  const output = await runLlm({
-    systemPrompt,
-    userPrompt,
-    agentName: "decomposer",
-    state,
   });
+
+  const pipelineState = state as unknown as PipelineState;
+
+  let output: string;
+  try {
+    output = await runLlm({
+      systemPrompt,
+      userPrompt,
+      agentName: "decomposer",
+      state: pipelineState,
+    });
+  } catch (err) {
+    decomposerLog.error("LLM call failed", { error: err as Error });
+    throw err;
+  }
 
   const rows = parseRows(output);
 
-  yield {
+  const elapsed = Date.now() - startTime;
+  decomposerLog.info("complete", { rowCount: rows.length, elapsedMs: elapsed });
+
+  config?.writer?.({
     type: "agent_complete",
     agent: "decomposer",
     output: { rowCount: rows.length },
-  };
+  });
 
   return { rows };
 }
@@ -68,7 +77,7 @@ function buildDecomposerSystemPrompt(): string {
 4. 只输出纯 JSON 数组，不要包含其他文字`;
 }
 
-function buildDecomposerUserPrompt(state: PipelineState): string {
+function buildDecomposerUserPrompt(state: GraphState): string {
   return `请根据以下需求简报拆解功能清单：
 
 ${state.structuredBrief || "（无结构化简报，请根据原始需求拆解）"}
@@ -77,7 +86,6 @@ ${state.structuredBrief || "（无结构化简报，请根据原始需求拆解�
 }
 
 function parseRows(output: string): QuotationRow[] {
-  // Find JSON array in the output
   const match = output.match(/\[[\s\S]*\]/);
   if (!match) {
     throw new Error("Decomposer: failed to find JSON array in LLM output");

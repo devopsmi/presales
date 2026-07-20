@@ -1,4 +1,29 @@
+import { Annotation } from "@langchain/langgraph";
 import type { TradeRole } from "@/lib/constants";
+
+/**
+ * LangGraph state annotation — maps 1:1 to PipelineState fields.
+ * Each key uses a default LastValue channel (most recent write wins).
+ */
+export const GraphStateAnnotation = Annotation.Root({
+  rawText: Annotation<string>,
+  attachments: Annotation<Attachment[]>,
+  selectedTrades: Annotation<TradeRole[]>,
+  budgetRange: Annotation<[number, number]>,
+  modelProvider: Annotation<string>,
+  customerName: Annotation<string>,
+  projectName: Annotation<string>,
+  structuredBrief: Annotation<string>,
+  rows: Annotation<QuotationRow[]>,
+  quotationFile: Annotation<Buffer | null>,
+  /** Serialized quotation JSON for frontend consumption */
+  quotationJson: Annotation<string>,
+  currentAgent: Annotation<string>,
+  error: Annotation<string | null>,
+});
+
+/** Inferred LangGraph state type */
+export type GraphState = typeof GraphStateAnnotation.State;
 
 export interface Attachment {
   name: string;
@@ -39,6 +64,7 @@ export interface PipelineState {
   rows: QuotationRow[];
 
   quotationFile: Buffer | null;
+  quotationJson: string;
 
   currentAgent: string;
   error: string | null;
@@ -68,6 +94,7 @@ export function createInitialState(input: {
     structuredBrief: "",
     rows: [],
     quotationFile: null,
+    quotationJson: "",
     currentAgent: "idle",
     error: null,
   };

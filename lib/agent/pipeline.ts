@@ -1,16 +1,18 @@
-import type { Attachment, PipelineEvent, PipelineState } from "@/lib/agent/state";
-import type { QuotationRow } from "@/lib/agent/state";
-import { createInitialState } from "@/lib/agent/state";
-import { runMockLlm } from "@/lib/agent/mock-llm";
-import { runParserNode } from "@/lib/agent/nodes/parser";
-import { runDecomposerNode } from "@/lib/agent/nodes/decomposer";
-import { runEstimatorNode } from "@/lib/agent/nodes/estimator";
-import { runQuoterNode } from "@/lib/agent/nodes/quoter";
+import { StateGraph } from "@langchain/langgraph";
+import { GraphStateAnnotation } from "@/lib/agent/state";
+import type { GraphState } from "@/lib/agent/state";
+import type { Attachment, PipelineEvent } from "@/lib/agent/state";
 import type { TradeRole } from "@/lib/constants";
+import { VENDOR_NAME } from "@/lib/constants";
+import type { RunLlmFn } from "@/lib/agent/llm";
+import log from "@/lib/logger";
+import { parserNode } from "@/lib/agent/nodes/parser";
+import { decomposerNode } from "@/lib/agent/nodes/decomposer";
+import { estimatorNode } from "@/lib/agent/nodes/estimator";
+import { quoterNode } from "@/lib/agent/nodes/quoter";
 
-/**
- * Pipeline input — mirrors what the chat route receives from the client.
- */
+const pipelineLog = log.child({ module: "pipeline" });
+
 export interface PipelineInput {
   rawText: string;
   attachments: Attachment[];
@@ -20,124 +22,132 @@ export interface PipelineInput {
   llmProvider: "mock" | "openai";
 }
 
-type RunLlmFn = (params: {
-  systemPrompt: string;
-  userPrompt: string;
-  agentName: string;
-  state: PipelineState;
-}) => Promise<string>;
-
-async function resolveLlm(provider: "mock" | "openai"): Promise<RunLlmFn> {
-  if (provider === "mock") {
-    return runMockLlm;
-  }
-  // TODO: integrate with @langchain/openai ChatOpenAI
-  throw new Error(`LLM provider not yet implemented: ${provider}`);
+interface SseMessage {
+  type: "text-start" | "text-delta" | "text-end" | "finish" | "error";
+  id?: string;
+  delta?: string;
+  finishReason?: string;
+  error?: string;
 }
 
-type NodeGenerator = AsyncGenerator<PipelineEvent, Partial<PipelineState>>;
-type AgentCompleteEvent = Extract<PipelineEvent, { type: "agent_complete" }>;
-
-function isQuotationRowArray(value: unknown): value is QuotationRow[] {
-  if (!Array.isArray(value)) return false;
-  for (const item of value) {
-    if (!item || typeof item !== "object") return false;
-    const obj: Record<string, unknown> = item;
-    const moduleVal: unknown = obj["module"];
-    const functionVal: unknown = obj["function"];
-    const categoryVal: unknown = obj["category"];
-    if (typeof moduleVal !== "string") return false;
-    if (typeof functionVal !== "string") return false;
-    if (categoryVal !== "design" && categoryVal !== "feature") return false;
-  }
-  return true;
+function buildGraph() {
+  return new StateGraph(GraphStateAnnotation)
+    .addNode("parser", parserNode)
+    .addNode("decomposer", decomposerNode)
+    .addNode("estimator", estimatorNode)
+    .addNode("quoter", quoterNode)
+    .addEdge("__start__", "parser")
+    .addEdge("parser", "decomposer")
+    .addEdge("decomposer", "estimator")
+    .addEdge("estimator", "quoter")
+    .addEdge("quoter", "__end__")
+    .compile();
 }
 
-/**
- * Drain a node's async generator, yielding each event to the outer consumer
- * and returning the node's final state delta. On `agent_complete`, also runs
- * the optional handler so the caller can update `state` from the event output.
- */
-async function* drainNode(
-  gen: NodeGenerator,
-  onAgentComplete?: (event: AgentCompleteEvent) => void,
-): AsyncGenerator<PipelineEvent, Partial<PipelineState>> {
-  let next = await gen.next();
-  while (!next.done) {
-    if (next.value.type === "agent_complete" && onAgentComplete) {
-      onAgentComplete(next.value);
-    }
-    yield next.value;
-    next = await gen.next();
-  }
-  return next.value;
+function initState(input: PipelineInput): GraphState {
+  return {
+    rawText: input.rawText,
+    attachments: input.attachments,
+    selectedTrades: input.selectedTrades,
+    budgetRange: input.budgetRange,
+    modelProvider: input.modelProvider,
+    customerName: "",
+    projectName: "",
+    structuredBrief: "",
+    rows: [],
+    quotationFile: null,
+    quotationJson: "",
+    currentAgent: "idle",
+    error: null,
+  };
 }
 
-/**
- * Creates the presales pipeline as an async generator of PipelineEvents.
- *
- * Chains parser → decomposer → estimator → quoter sequentially,
- * propagating state between nodes and emitting streamable events.
- */
-export async function* createPipeline(
+function pipelineEventToText(event: PipelineEvent): string | null {
+  switch (event.type) {
+    case "agent_start":
+      return `\n\n### ${event.agent} 开始工作...\n\n`;
+    case "agent_progress":
+      return `> ${event.message}\n`;
+    case "agent_complete":
+      return `\n${event.agent} 完成。\n`;
+    case "pipeline_complete":
+      return null;
+    default:
+      return null;
+  }
+}
+
+export async function* streamPipeline(
   input: PipelineInput,
-): AsyncGenerator<PipelineEvent> {
-  const state: PipelineState = createInitialState(input);
-  const runLlm = await resolveLlm(input.llmProvider);
+  runLlm: RunLlmFn,
+): AsyncGenerator<SseMessage> {
+  const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const logger = pipelineLog.withRequestId(requestId);
+  const startTime = Date.now();
 
-  // Agent-1: Parser
-  state.currentAgent = "parser";
-  const parserDelta = yield* drainNode(runParserNode(state, runLlm), (event) => {
-    const output = event.output;
-    if (typeof output.customerName === "string") {
-      state.customerName = output.customerName;
-    }
-    if (typeof output.projectName === "string") {
-      state.projectName = output.projectName;
-    }
-    if (typeof output.structuredBrief === "string") {
-      state.structuredBrief = output.structuredBrief;
-    }
+  logger.info("pipeline start", {
+    selectedTrades: input.selectedTrades.length,
+    budgetRange: input.budgetRange,
+    hasAttachments: input.attachments.length > 0,
   });
-  if (typeof parserDelta.structuredBrief === "string") {
-    state.structuredBrief = parserDelta.structuredBrief;
-  }
-  if (typeof parserDelta.customerName === "string") {
-    state.customerName = parserDelta.customerName;
-  }
-  if (typeof parserDelta.projectName === "string") {
-    state.projectName = parserDelta.projectName;
-  }
 
-  // Agent-2: Decomposer
-  state.currentAgent = "decomposer";
-  const decomposerDelta = yield* drainNode(
-    runDecomposerNode(state, runLlm),
-    (event) => {
-      if (isQuotationRowArray(event.output.rows)) {
-        state.rows = event.output.rows;
+  try {
+    const graph = buildGraph();
+    const state = initState(input);
+    const msgId = `msg-${Date.now()}`;
+
+    const stream = await graph.stream(state, {
+      streamMode: ["custom", "values"],
+      configurable: { runLlm },
+    });
+
+    yield { type: "text-start", id: msgId };
+
+    let result: GraphState | null = null;
+    for await (const chunk of stream) {
+      const [mode, data] = chunk as [string, unknown];
+      if (mode === "custom" && isPipelineEvent(data)) {
+        const text = pipelineEventToText(data);
+        if (text !== null) {
+          yield { type: "text-delta", id: msgId, delta: text };
+        }
       }
-    },
-  );
-  if (isQuotationRowArray(decomposerDelta.rows)) {
-    state.rows = decomposerDelta.rows;
-  }
-
-  // Agent-3: Estimator
-  state.currentAgent = "estimator";
-  const estimatorDelta = yield* drainNode(
-    runEstimatorNode(state, runLlm),
-    (event) => {
-      if (isQuotationRowArray(event.output.rows)) {
-        state.rows = event.output.rows;
+      if (mode === "values") {
+        result = data as GraphState;
       }
-    },
-  );
-  if (isQuotationRowArray(estimatorDelta.rows)) {
-    state.rows = estimatorDelta.rows;
-  }
+    }
 
-  // Agent-4: Quoter (emits its own pipeline_complete event)
-  state.currentAgent = "quoter";
-  yield* drainNode(runQuoterNode(state, runLlm));
+    if (!result) {
+      throw new Error("Pipeline did not produce final state");
+    }
+    if (result.rows.length > 0) {
+      const header = {
+        customerName: result.customerName || "未指定客户",
+        projectName: result.projectName || "未指定项目",
+        quoteDate: new Date().toISOString().slice(0, 10),
+        vendorName: VENDOR_NAME,
+      };
+      const quotation = JSON.stringify({ header, rows: result.rows });
+      yield { type: "text-delta", id: msgId, delta: `\n\n__QUOTATION__${quotation}__END_QUOTATION__\n` };
+    }
+
+    const elapsed = Date.now() - startTime;
+    logger.info("pipeline complete", { rowsCount: result.rows.length, elapsedMs: elapsed });
+
+    yield { type: "text-end", id: msgId };
+    yield { type: "finish", finishReason: "stop" };
+  } catch (err) {
+    const elapsed = Date.now() - startTime;
+    logger.error("pipeline error", { error: err as Error, elapsedMs: elapsed });
+    yield { type: "text-end", id: `msg-${Date.now()}` };
+    yield { type: "error", error: err instanceof Error ? err.message : "Pipeline error" };
+    yield { type: "finish", finishReason: "error" };
+  }
+}
+
+function isPipelineEvent(value: unknown): value is PipelineEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  const validTypes = ["agent_start", "agent_progress", "agent_complete", "pipeline_complete"];
+  return typeof obj.type === "string" && validTypes.includes(obj.type);
 }

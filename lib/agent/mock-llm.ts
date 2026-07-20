@@ -2,6 +2,9 @@ import type { PipelineState } from "@/lib/agent/state";
 import type { QuotationRow } from "@/lib/agent/state";
 import type { TradeRole } from "@/lib/constants";
 import { VENDOR_NAME } from "@/lib/constants";
+import log from "@/lib/logger";
+
+const mockLog = log.child({ module: "mock-llm" });
 
 /**
  * Deterministic mock LLM that produces structured outputs based on agentName + state.
@@ -13,17 +16,27 @@ export async function runMockLlm(params: {
   agentName: string;
   state: PipelineState;
 }): Promise<string> {
-  switch (params.agentName) {
-    case "parser":
-      return mockParserOutput(params.state.rawText);
-    case "decomposer":
-      return mockDecomposerOutput(params.state.structuredBrief);
-    case "estimator":
-      return mockEstimatorOutput(params.userPrompt, params.state.selectedTrades);
-    case "quoter":
-      return mockQuoterOutput(params.state);
-    default:
-      throw new Error(`Unknown agent name: ${params.agentName}`);
+  mockLog.debug("Mock LLM call", { agentName: params.agentName });
+
+  try {
+    switch (params.agentName) {
+      case "parser":
+        return mockParserOutput(params.state.rawText);
+      case "decomposer":
+        return mockDecomposerOutput(params.state.structuredBrief);
+      case "estimator":
+        return mockEstimatorOutput(params.userPrompt, params.state.selectedTrades);
+      case "quoter":
+        return mockQuoterOutput(params.state);
+      default:
+        throw new Error(`Unknown agent name: ${params.agentName}`);
+    }
+  } catch (err) {
+    mockLog.error("Mock LLM call failed", {
+      agentName: params.agentName,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+    throw err;
   }
 }
 

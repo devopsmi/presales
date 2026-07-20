@@ -1,11 +1,12 @@
+import type { LangGraphRunnableConfig } from "@langchain/langgraph";
 import { createInitialState } from "@/lib/agent/state";
-import type { PipelineState, QuotationRow, QuotationHeader } from "@/lib/agent/state";
+import type { GraphState, QuotationRow, PipelineEvent } from "@/lib/agent/state";
 import type { TradeRole } from "@/lib/constants";
 import { runMockLlm } from "@/lib/agent/mock-llm";
-import { runParserNode } from "@/lib/agent/nodes/parser";
-import { runDecomposerNode } from "@/lib/agent/nodes/decomposer";
-import { runEstimatorNode } from "@/lib/agent/nodes/estimator";
-import { runQuoterNode } from "@/lib/agent/nodes/quoter";
+import { parserNode } from "@/lib/agent/nodes/parser";
+import { decomposerNode } from "@/lib/agent/nodes/decomposer";
+import { estimatorNode } from "@/lib/agent/nodes/estimator";
+import { quoterNode } from "@/lib/agent/nodes/quoter";
 
 // ---------------------------------------------------------------------------
 // Test harness
@@ -24,20 +25,6 @@ function assert(condition: boolean, name: string): void {
   }
 }
 
-async function consumeAsyncGen<T, R>(
-  gen: AsyncGenerator<T, R>,
-  handler?: (event: T) => void,
-): Promise<R> {
-  let result: IteratorResult<T, R> = await gen.next();
-  while (!result.done) {
-    if (handler && result.value !== undefined) {
-      handler(result.value as T);
-    }
-    result = await gen.next();
-  }
-  return result.value;
-}
-
 // ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
@@ -46,37 +33,51 @@ const FIXTURE_RAW_TEXT = "做一个电商小程序，包含商品展示、购物
 const FIXTURE_SELECTED_TRADES: TradeRole[] = ["frontend", "backend", "design"];
 const FIXTURE_BUDGET_RANGE: [number, number] = [50000, 150000];
 
-function createFixtureState(): PipelineState {
-  return createInitialState({
+function createFixtureState(): GraphState {
+  const ps = createInitialState({
     rawText: FIXTURE_RAW_TEXT,
     attachments: [],
     selectedTrades: FIXTURE_SELECTED_TRADES,
     budgetRange: FIXTURE_BUDGET_RANGE,
     modelProvider: "mock",
   });
+  return {
+    rawText: ps.rawText,
+    attachments: ps.attachments,
+    selectedTrades: ps.selectedTrades,
+    budgetRange: ps.budgetRange,
+    modelProvider: ps.modelProvider,
+    customerName: ps.customerName,
+    projectName: ps.projectName,
+    structuredBrief: ps.structuredBrief,
+    rows: ps.rows,
+    quotationFile: ps.quotationFile,
+    quotationJson: ps.quotationJson,
+    currentAgent: ps.currentAgent,
+    error: ps.error,
+  };
+}
+
+function recordingConfig(): { config: LangGraphRunnableConfig; events: PipelineEvent[] } {
+  const events: PipelineEvent[] = [];
+  const config: LangGraphRunnableConfig = {
+    configurable: { runLlm: runMockLlm },
+    writer: (data: unknown) => { events.push(data as PipelineEvent); },
+  };
+  return { config, events };
 }
 
 // ---------------------------------------------------------------------------
 // Test: Parser
 // ---------------------------------------------------------------------------
 
-async function testParser(): Promise<Partial<PipelineState>> {
+async function testParser(): Promise<Partial<GraphState>> {
   console.log("\n--- Test: Parser Node ---");
 
   const state = createFixtureState();
+  const { config, events } = recordingConfig();
 
-  let eventCount = 0;
-  const events: string[] = [];
-
-  const result = await consumeAsyncGen(
-    runParserNode(state, runMockLlm),
-    (event) => {
-      eventCount++;
-      if (event.type) {
-        events.push(event.type);
-      }
-    },
-  );
+  const result = await parserNode(state, config);
 
   assert(
     typeof result.structuredBrief === "string" && result.structuredBrief.length > 0,
@@ -90,9 +91,11 @@ async function testParser(): Promise<Partial<PipelineState>> {
     typeof result.projectName === "string" && result.projectName.length > 0,
     `projectName is non-empty: "${result.projectName ?? "undefined"}"`,
   );
-  assert(eventCount >= 3, `Emitted at least 3 events (got ${eventCount})`);
+  assert(events.length >= 3, `Emitted at least 3 events (got ${events.length})`);
+
+  const types = events.map(e => e.type);
   assert(
-    events.includes("agent_start") && events.includes("agent_complete"),
+    types.includes("agent_start") && types.includes("agent_complete"),
     "Emitted agent_start and agent_complete events",
   );
 
@@ -103,35 +106,24 @@ async function testParser(): Promise<Partial<PipelineState>> {
 // Test: Decomposer
 // ---------------------------------------------------------------------------
 
-async function testDecomposer(parserResult: Partial<PipelineState>): Promise<Partial<PipelineState>> {
+async function testDecomposer(parserResult: Partial<GraphState>): Promise<Partial<GraphState>> {
   console.log("\n--- Test: Decomposer Node ---");
 
-  const state: PipelineState = {
-    ...createFixtureState(),
+  const base = createFixtureState();
+  const state: GraphState = {
+    ...base,
     structuredBrief: parserResult.structuredBrief ?? "",
     customerName: parserResult.customerName ?? "",
     projectName: parserResult.projectName ?? "",
   };
 
-  let eventCount = 0;
-  const events: string[] = [];
-
-  const result = await consumeAsyncGen(
-    runDecomposerNode(state, runMockLlm),
-    (event) => {
-      eventCount++;
-      if (event.type) {
-        events.push(event.type);
-      }
-    },
-  );
+  const { config, events } = recordingConfig();
+  const result = await decomposerNode(state, config);
 
   const rows: QuotationRow[] = result.rows ?? [];
-
   assert(rows.length >= 6, `rows has at least 6 items (got ${rows.length})`);
   assert(rows.length <= 12, `rows has at most 12 items (got ${rows.length})`);
 
-  // Validate each row structure
   let allValid = true;
   for (const row of rows) {
     if (
@@ -151,13 +143,11 @@ async function testDecomposer(parserResult: Partial<PipelineState>): Promise<Par
   }
   assert(allValid, "All rows have valid QuotationRow structure");
 
-  // Check that design rows come first and have empty trades
   const designRows = rows.filter((r) => r.category === "design");
   const featureRows = rows.filter((r) => r.category === "feature");
   assert(designRows.length > 0, `Has design rows (got ${designRows.length})`);
   assert(featureRows.length > 0, `Has feature rows (got ${featureRows.length})`);
 
-  // Design rows should appear before feature rows
   const firstFeatureIdx = rows.findIndex((r) => r.category === "feature");
   const lastDesignIdx = rows.map((r, i) => (r.category === "design" ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
   assert(
@@ -165,16 +155,16 @@ async function testDecomposer(parserResult: Partial<PipelineState>): Promise<Par
     "Design rows appear before feature rows",
   );
 
-  // Verify trades are empty (decomposer doesn't fill trades)
   const allTradesEmpty = rows.every((r) => {
     const entries = Object.entries(r.trades);
     return entries.length === 0 || entries.every(([, v]) => v === undefined || v === null);
   });
   assert(allTradesEmpty, "All trades are empty after decomposer");
 
-  assert(eventCount >= 3, `Emitted at least 3 events (got ${eventCount})`);
+  assert(events.length >= 3, `Emitted at least 3 events (got ${events.length})`);
+  const types = events.map(e => e.type);
   assert(
-    events.includes("agent_start") && events.includes("agent_complete"),
+    types.includes("agent_start") && types.includes("agent_complete"),
     "Emitted agent_start and agent_complete events",
   );
 
@@ -186,44 +176,32 @@ async function testDecomposer(parserResult: Partial<PipelineState>): Promise<Par
 // ---------------------------------------------------------------------------
 
 async function testEstimator(
-  decomposerResult: Partial<PipelineState>,
+  decomposerResult: Partial<GraphState>,
   customerName: string,
   projectName: string,
-): Promise<Partial<PipelineState>> {
+): Promise<Partial<GraphState>> {
   console.log("\n--- Test: Estimator Node ---");
 
-  const state: PipelineState = {
-    ...createFixtureState(),
+  const base = createFixtureState();
+  const state: GraphState = {
+    ...base,
     rows: decomposerResult.rows ?? [],
     customerName,
     projectName,
-    selectedTrades: FIXTURE_SELECTED_TRADES,
   };
 
-  let eventCount = 0;
-  const events: string[] = [];
-
-  const result = await consumeAsyncGen(
-    runEstimatorNode(state, runMockLlm),
-    (event) => {
-      eventCount++;
-      if (event.type) {
-        events.push(event.type);
-      }
-    },
-  );
+  const { config, events } = recordingConfig();
+  const result = await estimatorNode(state, config);
 
   const rows: QuotationRow[] = result.rows ?? [];
   assert(rows.length > 0, `Estimator returned rows (got ${rows.length})`);
 
-  // Check that trades are filled for each row
   const tradesFilledCount = rows.filter((r) => {
     const entries = Object.entries(r.trades);
     return entries.some(([, v]) => typeof v === "number" && v > 0);
   }).length;
   assert(tradesFilledCount > 0, `At least one row has non-null trade values (${tradesFilledCount} rows with estimates)`);
 
-  // Verify each row's trades match selectedTrades keys
   let allTradeKeysValid = true;
   for (const row of rows) {
     for (const trade of Object.keys(row.trades)) {
@@ -235,15 +213,15 @@ async function testEstimator(
   }
   assert(allTradeKeysValid, "All trade keys in rows are from selectedTrades");
 
-  // Verify at least some numeric estimates
   const numericCount = rows.reduce((sum, r) => {
     return sum + Object.values(r.trades).filter((v) => typeof v === "number" && v > 0).length;
   }, 0);
   assert(numericCount > 0, `At least one numeric estimate across all rows (got ${numericCount})`);
 
-  assert(eventCount >= 3, `Emitted at least 3 events (got ${eventCount})`);
+  assert(events.length >= 3, `Emitted at least 3 events (got ${events.length})`);
+  const types = events.map(e => e.type);
   assert(
-    events.includes("agent_start") && events.includes("agent_complete"),
+    types.includes("agent_start") && types.includes("agent_complete"),
     "Emitted agent_start and agent_complete events",
   );
 
@@ -255,37 +233,28 @@ async function testEstimator(
 // ---------------------------------------------------------------------------
 
 async function testQuoter(
-  estimatorResult: Partial<PipelineState>,
+  estimatorResult: Partial<GraphState>,
   customerName: string,
   projectName: string,
-): Promise<Partial<PipelineState>> {
+): Promise<Partial<GraphState>> {
   console.log("\n--- Test: Quoter Node ---");
 
-  const state: PipelineState = {
-    ...createFixtureState(),
+  const base = createFixtureState();
+  const state: GraphState = {
+    ...base,
     rows: estimatorResult.rows ?? [],
     customerName,
     projectName,
     budgetRange: FIXTURE_BUDGET_RANGE,
   };
 
-  let eventCount = 0;
-  const events: string[] = [];
+  const { config, events } = recordingConfig();
+  const result = await quoterNode(state, config);
 
-  const result = await consumeAsyncGen(
-    runQuoterNode(state, runMockLlm),
-    (event) => {
-      eventCount++;
-      if (event.type) {
-        events.push(event.type);
-      }
-    },
-  );
-
-  const hasPipelineComplete = events.includes("pipeline_complete");
+  const types = events.map(e => e.type);
+  const hasPipelineComplete = types.includes("pipeline_complete");
   assert(hasPipelineComplete, "Emitted pipeline_complete event");
 
-  // Check returned data
   assert(
     typeof result.customerName === "string" && result.customerName.length > 0,
     `Quoter returned customerName: "${result.customerName ?? "undefined"}"`,
@@ -295,7 +264,7 @@ async function testQuoter(
     `Quoter returned projectName: "${result.projectName ?? "undefined"}"`,
   );
 
-  assert(eventCount >= 3, `Emitted at least 3 events (got ${eventCount})`);
+  assert(events.length >= 3, `Emitted at least 3 events (got ${events.length})`);
 
   return result;
 }

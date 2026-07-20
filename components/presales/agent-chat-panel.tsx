@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useMemo, useCallback } from "react";
+import { useEffect, useMemo, useCallback } from "react";
 import { useChat } from "@ai-sdk/react";
 import { MessageList } from "@/components/agent-elements/message-list";
 import { InputBar } from "@/components/agent-elements/input-bar";
@@ -12,27 +12,31 @@ import { ModelPicker } from "./model-picker";
 import { usePresales } from "@/lib/presales-context";
 import type { QuotationRow, QuotationHeader } from "@/lib/agent/state";
 
-function extractQuotation(messages: { parts?: Array<{ type: string; text?: string }> }[]): {
-  header: QuotationHeader;
-  rows: QuotationRow[];
-} | null {
+function extractQuotationFromText(text: string): { header: QuotationHeader; rows: QuotationRow[] } | null {
+  const startIdx = text.indexOf("__QUOTATION__");
+  if (startIdx === -1) return null;
+  const endIdx = text.indexOf("__END_QUOTATION__", startIdx + 13);
+  if (endIdx === -1) return null;
+  try {
+    const data = JSON.parse(text.slice(startIdx + 13, endIdx));
+    if (data.header && Array.isArray(data.rows)) return data;
+  } catch { }
+  return null;
+}
+
+function extractQuotationFromMessages(
+  messages: Array<{ content?: string; parts?: Array<{ type: string; text?: string }> }>,
+): { header: QuotationHeader; rows: QuotationRow[] } | null {
   for (const msg of [...messages].reverse()) {
-    const parts = msg.parts ?? [];
-    for (const part of parts) {
-      if (part.type !== "text" || !part.text) continue;
-      const startIdx = part.text.indexOf("__QUOTATION__");
-      if (startIdx === -1) continue;
-      const endIdx = part.text.indexOf("__END_QUOTATION__", startIdx + 14);
-      if (endIdx === -1) continue;
-      const jsonStr = part.text.slice(startIdx + 14, endIdx);
-      try {
-        const data = JSON.parse(jsonStr);
-        if (data.header && Array.isArray(data.rows)) {
-          return { header: data.header, rows: data.rows };
-        }
-      } catch {
-        continue;
+    for (const part of msg.parts ?? []) {
+      if (part.type === "text" && part.text) {
+        const q = extractQuotationFromText(part.text);
+        if (q) return q;
       }
+    }
+    if (msg.content) {
+      const q = extractQuotationFromText(msg.content);
+      if (q) return q;
     }
   }
   return null;
@@ -48,11 +52,17 @@ export function AgentChatPanel() {
     setQuotation,
     setHeader,
   } = usePresales();
-  const prevMsgCount = useRef(0);
 
-  const { messages, status, sendMessage, stop } = useChat();
+  const { messages, status, sendMessage, stop } = useChat({
+    onFinish: (options) => {
+      const q = extractQuotationFromMessages([options.message]);
+      if (q) {
+        setHeader(q.header);
+        setQuotation(q.rows);
+      }
+    },
+  });
 
-  // Map File[] to AttachedFile[] with stable index-based ids
   const attachedFiles: AttachedFile[] = useMemo(
     () =>
       attachments.map((f, i) => ({
@@ -73,17 +83,22 @@ export function AgentChatPanel() {
     [attachments.length, removeAttachment],
   );
 
-  // Extract quotation from streamed messages
   useEffect(() => {
-    if (messages.length <= prevMsgCount.current) return;
-    prevMsgCount.current = messages.length;
-
-    const quotation = extractQuotation(messages as Array<{ parts?: Array<{ type: string; text?: string }> }>);
-    if (quotation) {
-      setHeader(quotation.header);
-      setQuotation(quotation.rows);
+    const q = extractQuotationFromMessages(
+      messages as Array<{ content?: string; parts?: Array<{ type: string; text?: string }> }>,
+    );
+    if (q) {
+      setHeader(q.header);
+      setQuotation(q.rows);
     }
   }, [messages, setHeader, setQuotation]);
+
+  useEffect(() => {
+    if (status === "ready" && messages.length === 0) {
+      setQuotation(null);
+      setHeader(null);
+    }
+  }, [status, messages.length, setQuotation, setHeader]);
 
   function handleSend(message: { role: "user"; content: string }) {
     const configMeta = JSON.stringify({
@@ -97,7 +112,7 @@ export function AgentChatPanel() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0 overflow-scroll scrollbar-none">
         <MessageList messages={messages} status={status} />
       </div>
       <InputBar

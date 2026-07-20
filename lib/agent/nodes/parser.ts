@@ -1,43 +1,53 @@
-import type { PipelineState, PipelineEvent } from "@/lib/agent/state";
+import log from "@/lib/logger";
+import type { LangGraphRunnableConfig } from "@langchain/langgraph";
+import type { RunLlmFn } from "@/lib/agent/llm";
+import type { GraphState } from "@/lib/agent/state";
+import type { PipelineState } from "@/lib/agent/state";
 
-/**
- * Parser node: consumes raw text + attachments and produces a structured brief.
- *
- * Yields agent_start / agent_progress / agent_complete events,
- * and returns { structuredBrief, customerName, projectName }.
- */
-export async function* runParserNode(
-  state: PipelineState,
-  runLlm: (params: {
-    systemPrompt: string;
-    userPrompt: string;
-    agentName: string;
-    state: PipelineState;
-  }) => Promise<string>,
-): AsyncGenerator<PipelineEvent, Partial<PipelineState>> {
-  yield { type: "agent_start", agent: "parser" };
+const parserLog = log.child({ agent: "parser" });
+
+export async function parserNode(
+  state: GraphState,
+  config?: LangGraphRunnableConfig,
+): Promise<Partial<GraphState>> {
+  const runLlm = config?.configurable?.runLlm as RunLlmFn;
+
+  parserLog.info("starting");
+  const startTime = Date.now();
+
+  config?.writer?.({ type: "agent_start", agent: "parser" });
 
   const systemPrompt = buildParserSystemPrompt();
   const userPrompt = buildParserUserPrompt(state);
 
-  yield { type: "agent_progress", agent: "parser", message: "正在解析需求文档，提取关键信息..." };
+  config?.writer?.({ type: "agent_progress", agent: "parser", message: "正在解析需求文档，提取关键信息..." });
 
-  const output = await runLlm({
-    systemPrompt,
-    userPrompt,
-    agentName: "parser",
-    state,
-  });
+  const pipelineState = state as unknown as PipelineState;
 
-  // Extract customer name and project name from output (deterministic mock produces markdown)
+  let output: string;
+  try {
+    output = await runLlm({
+      systemPrompt,
+      userPrompt,
+      agentName: "parser",
+      state: pipelineState,
+    });
+  } catch (err) {
+    parserLog.error("LLM call failed", { error: err as Error });
+    throw err;
+  }
+
   const customerName = extractName(output, /客户名称[：:]\s*(.+)/) ?? "未指定客户";
   const projectName = extractName(output, /^##\s*(.+)/m) ?? "未指定项目";
 
-  yield {
+  const elapsed = Date.now() - startTime;
+  parserLog.info("complete", { customerName, projectName, briefLength: output.length, elapsedMs: elapsed });
+
+  config?.writer?.({
     type: "agent_complete",
     agent: "parser",
     output: { customerName, projectName },
-  };
+  });
 
   return {
     structuredBrief: output,
@@ -60,7 +70,7 @@ function buildParserSystemPrompt(): string {
 请确保输出专业、结构清晰、便于后续功能拆解。`;
 }
 
-function buildParserUserPrompt(state: PipelineState): string {
+function buildParserUserPrompt(state: GraphState): string {
   const parts: string[] = [];
 
   if (state.rawText) {
