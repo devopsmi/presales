@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "agent-elements": {
+      "source": "21st-dev/agent-elements",
+      "sourceType": "github",
+      "skillPath": "skills/agent-elements/SKILL.md",
+      "computedHash": "899ff281733653460fc7c0864daaa602fb9d32b176f3653178791fae657d9277"
+    },
+    "xlsx": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/xlsx/SKILL.md",
+      "computedHash": "f5945e6e76dc7c178375e5cdf3140959b30cbcd4570ec3dc62296812259fc38d"
+    }
+  }
+}
