@@ -12,6 +12,10 @@ import {
   IconFilePlus as FilePlus,
   IconChecklist as ListTodo,
   IconLogout as LogOut,
+  IconFileDescription as FileText,
+  IconListSearch as ListSearch,
+  IconCalculator as Calculator,
+  IconReceipt as Receipt,
 } from "@tabler/icons-react";
 
 export type ToolVariant = "simple" | "collapsible";
@@ -69,6 +73,178 @@ function calculateDiffStats(oldString: string, newString: string) {
 }
 
 export const toolRegistry: Record<string, ToolMeta> = {
+  // ── New Master-Slave Architecture tool names ──
+  "tool-subagent_file_parser": {
+    icon: FileText,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "文档解析中..." : "文档解析完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (o?.customerName) return `客户: ${o.customerName}`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
+  "tool-grill_me": {
+    icon: FileText,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "需求澄清中..." : "需求澄清完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (typeof o?.questionCount === "number") return `${o.questionCount} 个补充问题`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
+  "tool-subagent_decomposer": {
+    icon: ListSearch,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "功能拆解中..." : "功能拆解完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (typeof o?.rowCount === "number") return `${o.rowCount} 个功能项`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
+  "tool-subagent_estimator": {
+    icon: Receipt,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "工时估算中..." : "报价生成完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (o?.header?.projectName) return o.header.projectName;
+          if (Array.isArray(o?.rows)) return `${o.rows.length} 项报价`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
+  // ── Legacy tool names (backward compat) ──
+  "tool-pipeline_parser": {
+    icon: FileText,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "文档解析中..." : "文档解析完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (o?.customerName) return `客户: ${o.customerName}`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
+  "tool-pipeline_decomposer": {
+    icon: ListSearch,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "需求拆解中..." : "需求拆解完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (typeof o?.rowCount === "number") return `${o.rowCount} 个功能项`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
+  "tool-pipeline_estimator": {
+    icon: Calculator,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "工时评估中..." : "工时评估完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (typeof o?.rowCount === "number") return `${o.rowCount} 项已评估`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
+  "tool-pipeline_quoter": {
+    icon: Receipt,
+    title: (part: any) => {
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? "报价生成中..." : "报价生成完成";
+    },
+    subtitle: (part: any) => {
+      if (part.state === "output-available" && part.output) {
+        try {
+          const o =
+            typeof part.output === "string"
+              ? JSON.parse(part.output)
+              : part.output;
+          if (o?.header?.projectName) return o.header.projectName;
+          if (Array.isArray(o?.rows)) return `${o.rows.length} 项报价`;
+        } catch {}
+      }
+      return part.input || "";
+    },
+    variant: "simple" as const,
+  },
   "tool-Task": {
     icon: Sparkles,
     title: (part) => {

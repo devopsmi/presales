@@ -4,7 +4,7 @@
 
 ### 1.1 目标
 
-用户通过 Agent 对话框提交产品需求（文字描述 + PDF/Word/Excel 附件），系统自动交付：
+用户通过 Agent 对话框提交产品需求（文字描述 + 图片/PDF/Word/Excel 附件），系统自动交付：
 - 产品功能需求拆解清单
 - 对应工时报价表
 
@@ -19,7 +19,7 @@
 | 样式系统 | Tailwind CSS v4 | 原子化 CSS |
 | AI 编排 | LangChain / LangGraph | 多 Agent 管道编排与 LLM 调用管理 |
 | 流式通信 | Vercel AI SDK (`useChat`) | 前端流式消费 Agent 输出 |
-| 文件解析 | pdf-parse, mammoth (Word), xlsx (Excel) | 服务端解析上传文件 |
+| 文件解析 | pdf-parse, mammoth (Word), xlsx (Excel), sharp (Image) | 服务端解析上传文件 |
 | 表格导出 | exceljs (Excel), jspdf (PDF) | 前端表格导出 |
 
 ### 1.3 参与工种
@@ -41,133 +41,373 @@
 
 ---
 
-## 2. 系统架构
+## 2. 系统架构 — 主从架构 (Master-Slave)
 
-### 2.1 整体架构图
+### 2.1 架构概览
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      用户浏览器 (Frontend)                    │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                 AgentChat (Agent Elements)              │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │               MessageList                        │  │  │
-│  │  │  • User messages (文本 + 附件预览)                │  │  │
-│  │  │  • Agent thinking cards (ThinkingTool)           │  │  │
-│  │  │  • Pipeline progress (PlanTool)                   │  │  │
-│  │  │  • Final table result (Custom Tool Card)          │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │               InputBar                            │  │  │
-│  │  │  ┌────────┐ ┌──────────┐ ┌──────────┐ ┌───────┐ │  │  │
-│  │  │  │文件上传│ │参与工种  │ │预算范围  │ │模型   │ │  │  │
-│  │  │  │pdf/word│ │前端/后端 │ │¥1-50万  │ │GPT-4o │ │  │  │
-│  │  │  │/excel  │ │/UI/测试…│ │ 滑块    │ │DeepS  │ │  │  │
-│  │  │  └────────┘ └──────────┘ └──────────┘ └───────┘ │  │  │
-│  │  │  [──────────────────────────────────────────────]│  │  │
-│  │  │                                            [▶]  │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────┘  │
-└───────────────────────┬─────────────────────────────────────┘
-                        │ SSE Stream (Vercel AI SDK)
-                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Next.js API Route (/api/chat)              │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              Request Preprocessing                     │  │
-│  │  1. Extract text from attachments (pdf/word/excel)    │  │
-│  │  2. Parse trades, budget_range & model from metadata  │  │
-│  │  3. Merge into unified input context                  │  │
-│  └───────────────────────┬───────────────────────────────┘  │
-│                          ▼                                   │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │          Multi-Agent Pipeline (LangGraph)              │  │
-│  │                                                        │  │
-│  │  Agent-1 ──► Agent-2 ──► Agent-3 ──► Agent-4 ──►     │  │
-│  │  (文档解析)  (需求拆解)  (工时评估)  (报价生成)       │  │
-│  │                                                        │  │
-│  │  State: { raw_input → parsed_doc → requirements[]     │  │
-│  │           → estimates[] → quotation_table }            │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 2.2 Multi-Agent Pipeline 串行架构
-
-```mermaid
-graph TB
-    subgraph Input["📥 用户输入"]
-        TEXT["文字需求"]
-        FILES["附件<br/>(PDF/Word/Excel)"]
-        TRADES["参与工种<br/>(多选)"]
-        BUDGET["预算范围"]
-        MODEL["模型选择"]
-    end
-
-    subgraph Pipeline["🔗 Multi-Agent Pipeline (LangGraph StateGraph)"]
-        direction LR
-        AG1["Agent-1<br/>📄 文档解析Agent"] --> AG2["Agent-2<br/>🔍 需求拆解Agent"]
-        AG2 --> AG3["Agent-3<br/>⏱️ 工时评估Agent"]
-        AG3 --> AG4["Agent-4<br/>💰 报价生成Agent"]
-    end
-
-    subgraph Output["📊 交付产出"]
-        TABLE["单一报价表格<br/>（序号/模块/子模块/功能/子功能/功能描述<br/>+ 各工种人天列 + 备注）"]
-    end
-
-    subgraph Tools["🛠️ Agent工具集"]
-        T1["parse_pdf / parse_word / parse_excel"]
-        T2["search_similar_projects"]
-        T3["query_price_database"]
-    end
-
-    Input --> AG1
-    AG1 -.-> Tools
-    AG2 -.-> Tools
-    AG4 -.-> Tools
-    AG4 --> TABLE
-
-    style AG1 fill:#e8f5e9,stroke:#4caf50
-    style AG2 fill:#e3f2fd,stroke:#2196f3
-    style AG3 fill:#fff3e0,stroke:#ff9800
-    style AG4 fill:#fce4ec,stroke:#e91e63
-    style TABLE fill:#f3e5f5,stroke:#9c27b0
-```
-
-### 2.3 各 Agent 职责详述
-
-#### Agent-1: 文档解析Agent (Document Parser)
+系统采用 **主从架构**：一个直接与用户对话的 **主 Agent (Master Agent)** 负责交互调度，三个 **子 Agent (Sub-Agent)** 各司其职。主 Agent 维护一份统一的 **报价表**（共享状态），子 Agent 在调度链中按序写入。
 
 ```
-Input:  Raw text + uploaded files (PDF/Word/Excel)
+┌──────────────────────────────────────────────────────────────────┐
+│                        用户浏览器 (Frontend)                       │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │                  AgentChat (Agent Elements)                 │  │
+│  │  ┌──────────────────────────────────────────────────────┐  │  │
+│  │  │  对话消息（文本 + 附件预览 + 进度卡片 + 报价表格）    │  │  │
+│  │  └──────────────────────────────────────────────────────┘  │  │
+│  │  ┌──────────────────────────────────────────────────────┐  │  │
+│  │  │  InputBar + Config Bar（文件/工种/预算/模型）          │  │  │
+│  │  └──────────────────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 │ SSE Stream (Vercel AI SDK)
+                                 ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    主 Agent (Master Agent)                        │
+│                                                                  │
+│  • 与用户直接对话，接收所有输入                                      │
+│  • 调度子 Agent（固定顺序，保证报价表一致性）                          │
+│  • 维护报价表共享状态                                              │
+│  • 内置 Grill-me Skill，在解析文件后可向用户提问澄清模糊需求           │
+│              │                                                   │
+│     ┌────────┼────────┐                                          │
+│     ▼        ▼        ▼                                          │
+│  ┌──────┐ ┌──────┐ ┌──────┐                                     │
+│  │File  │ │Decom-│ │Esti- │  子 Agent（按序调度）                  │
+│  │Parser│→│poser │→│mator │                                     │
+│  └──────┘ └──┬───┘ └──────┘                                     │
+│              │ 共享报价表                                          │
+│              ▼                                                    │
+│        QuotationRow[]          ← decomposer 写入 → estimator 填充  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 调度链规则 (Dispatch Chain)
+
+主 Agent 调度子 Agent 遵循 **固定顺序**，不可跳过中间环节：
+
+```
+File Parser → [Grill-me Skill] → Decomposer → Estimator
+```
+
+**硬约束：**
+
+1. 必须先调用 File Parser 获取完整用户输入，才能进入后续阶段
+2. 调用 Decomposer 后，**必须**再调用 Estimator，确保报价表各部分一致（结构变化后工时同步更新）
+3. Estimator 不能独立调用，必须基于 Decomposer 产出的报价表
+
+**用户反馈重跑规则：**
+
+```
+用户："前端评估偏高"
+  → 主 Agent 判断：仅工时评估需调整
+  → 只重新调用 Estimator（Decomposer 输出的结构不变）
+
+用户："功能拆解遗漏了数据导出"
+  → 主 Agent 判断：报价表结构需变更
+  → 重新调用 Decomposer → Estimator（链式触发）
+
+用户："我的需求其实是要做一个小程序，不是网站"
+  → 主 Agent 判断：需求理解有偏差
+  → 重新调用 File Parser → [Grill-me] → Decomposer → Estimator（从头来）
+```
+
+### 2.3 报价表共享状态
+
+报价表 (`QuotationRow[]`) 是 Decomposer 和 Estimator 的共同产出物，由主 Agent 持有：
+
+```
+QuotationRow {
+  seq, module, sub_module, function, sub_function, description, category
+  └── Decomposer 产出 ──┘
+
+  trades: { frontend: 1.5, backend: 2, ... }
+  └── Estimator 填充 ──┘
+}
+```
+
+主 Agent 在接收用户反馈后，根据反馈类型决定从调度链的哪个环节重启，保证：
+- 结构不变 → 只跑 Estimator
+- 结构变化 → 跑 Decomposer + Estimator
+- 需求变化 → 从头跑全链
+
+---
+
+## 3. 主 Agent (Master Agent)
+
+### 3.1 职责
+
+| 职责 | 说明 |
+|------|------|
+| 用户对话 | 接收文本需求、附件、配置（工种/预算/模型），输出报价结果 |
+| 子 Agent 调度 | 按固定顺序调度 File Parser → Decomposer → Estimator |
+| 状态管理 | 持有报价表 `QuotationRow[]`，跟踪当前调度阶段 |
+| 一致性保证 | 强制 Decomposer→Estimator 链式调用 |
+| 用户反馈处理 | 识别反馈类型，从对应环节重启调度链 |
+| Grill-me Skill | 在 File Parser 完成后，向用户提问澄清模糊点 |
+| 进度流式推送 | 向前端实时推送各阶段进度事件 |
+
+### 3.2 Grill-me Skill
+
+**触发时机：** File Parser 完成解析后，Decomposer 开始前。
+
+**目的：** 在进入报价表拆解前，确保需求足够清晰，避免后续反复修改。
+
+**工作流程：**
+
+```
+File Parser 完成
+      │
+      ▼
+分析输入完整性 ── 清晰？──► 进入 Decomposer
+      │
+  有模糊点？
+      │
+      ▼
+生成针对性问题列表
+      │
+      ▼
+向用户提问（逐轮，最多 3 轮）
+      │
+      ▼
+收集回答，更新需求上下文
+      │
+      ▼
+需求足够清晰？── 是 ──► 进入 Decomposer
+      │
+     否（超过 3 轮仍不清晰）
+      │
+      ▼
+标记为"信息不全"并继续（标注风险）
+```
+
+**问题生成策略：**
+
+Grill-me 根据 File Parser 的输出，从以下维度检查并生成问题：
+
+| 检查维度 | 触发条件 | 问题示例 |
+|---------|---------|---------|
+| 项目范围 | 未明确产品类型/平台 | "这个系统是面向内部员工还是外部客户？" |
+| 用户角色 | 未提及用户类型 | "系统中涉及哪些角色？例如普通用户、管理员、审核员？" |
+| 核心功能 | 功能描述过于笼统 | "您提到'数据分析'模块，具体需要哪些维度的分析？" |
+| 技术约束 | 未指定技术偏好 | "对技术栈有偏好吗？例如是否必须使用某个框架？" |
+| 第三方集成 | 提及"对接XX"但未说明 | "与CRM系统对接是需要实时同步还是定时导入？" |
+| 数据规模 | 涉及大数据但未量化 | "预期的用户量和数据量大概是什么量级？" |
+| 交付时间 | 未提及时间要求 | "项目预计的交付时间是怎样？需要分期吗？" |
+
+### 3.3 主 Agent 状态
+
+```typescript
+interface MasterState {
+  // ── 输入层 ──
+  rawText: string;
+  attachments: Attachment[];
+  selectedTrades: TradeRole[];
+  budgetRange: [number, number];
+  modelProvider: string;
+  modelConfigs: ModelConfig[];
+
+  // ── 共享报价表 ──
+  rows: QuotationRow[];          // Decomposer 写入结构，Estimator 填充 trades
+
+  // ── 表头信息 ──
+  customerName: string;
+  projectName: string;
+  vendorName: string;
+
+  // ── 调度控制 ──
+  currentPhase: MasterPhase;     // 当前调度阶段
+  chainRestartPoint: ChainNode;  // 用户反馈后重启的环节
+
+  // ── Grill-me ──
+  clarifications: ClarificationQA[];
+  grillRound: number;            // 当前提问轮次
+
+  // ── 估算配置 ──
+  estimationPlanId: string;      // 工时估算方案 skill ID
+  quotedRates: Record<TradeRole, number>;  // 可自定义的人天单价
+}
+
+type MasterPhase =
+  | "idle"
+  | "parsing"
+  | "grilling"
+  | "decomposing"
+  | "estimating"
+  | "complete";
+
+type ChainNode = "parser" | "decomposer" | "estimator";
+```
+
+---
+
+## 4. 子 Agent 详述
+
+### 4.1 File Parser Agent（文件解析Agent）
+
+```
+Input:  Raw text + 附件（图片/PDF/Word/Excel）
 Output: 结构化的产品需求描述文档
-
-职责:
-1. 调用文件解析工具提取附件内容
-2. 将碎片化信息整合为统一的需求描述
-3. 识别关键信息：产品类型、目标用户、核心功能、技术约束
-4. 输出 Markdown 格式的结构化需求文档
-
-工具:
-- parse_pdf: 提取 PDF 文本/图片
-- parse_word: 提取 Word 文档内容
-- parse_excel: 提取 Excel 表格数据（可能是功能清单初稿）
 ```
 
-#### Agent-2: 需求拆解Agent (Requirement Decomposer)
+#### 4.1.1 工具集
+
+| 工具名 | 用途 | 实现库 |
+|--------|------|--------|
+| `parse_image` | 图片 OCR 文字提取 + 图片内容描述 | sharp + LLM vision |
+| `parse_pdf` | PDF 文本/图片提取 | pdf-parse |
+| `parse_word` | Word 文档内容提取 | mammoth |
+| `parse_excel` | Excel 表格数据提取（可能是功能清单初稿） | xlsx |
+
+#### 4.1.2 处理流程
+
+```
+接收附件列表
+      │
+      ▼
+┌─────────────────────────┐
+│ Step 1: 工具解析         │
+│ 按文件类型分别调用解析工具  │
+│ • 图片 → parse_image     │
+│ • PDF  → parse_pdf       │
+│ • Word → parse_word      │
+│ • Excel→ parse_excel     │
+└───────────┬─────────────┘
+            ▼
+┌─────────────────────────┐
+│ Step 2: 内容整合         │
+│ • 去重：合并重复内容       │
+│ • 提取：关键信息提取       │
+│   - 产品类型/平台          │
+│   - 目标用户               │
+│   - 核心功能模块            │
+│   - 技术约束               │
+│   - 第三方集成              │
+│ • 剔除：去掉无关冗余信息     │
+└───────────┬─────────────┘
+            ▼
+┌─────────────────────────┐
+│ Step 3: 输出结构化简报    │
+│ Markdown 格式，包含：     │
+│ 1. 项目标题               │
+│ 2. 客户信息               │
+│ 3. 项目概述（精炼版）       │
+│ 4. 核心模块列表            │
+│ 5. 技术要求               │
+│ 6. 交付要求               │
+│ 7. 待澄清项（供 Grill-me） │
+└─────────────────────────┘
+```
+
+#### 4.1.3 输出示例
+
+```markdown
+## 新兴市场数据看板系统
+
+### 客户信息
+- 客户名称：重庆天玑晟智物联科技有限公司
+- 行业类型：物联网
+
+### 项目概述
+开发一个数据看板系统，展示各分公司在新兴市场的运营数据，
+包括营收、订单量、客户增长等核心指标。支持大屏展示和移动端查看。
+
+### 核心模块
+1. 可视化大屏 - 新兴市场运营看板
+2. 数据管理后台 - 数据导入、指标配置
+3. 移动端查看 - 关键指标速览
+
+### 技术要求
+- 数据源：MySQL 数据库 + Excel 导入
+- 刷新频率：实时（大屏）/ T+1（明细）
+- 支持主流浏览器（Chrome、Edge）
+
+### 待澄清项
+- 数据看板的刷新频率是否需要可配置？
+- 是否需要支持多语言的国际化？
+```
+
+### 4.2 Decomposer Agent（功能拆解Agent）
 
 ```
 Input:  结构化需求描述文档
-Output: 功能拆解清单 (平铺表格 JSON Array)
+Output: QuotationRow[]（tree 结构，trades 为空）
+```
 
-职责:
-1. 将产品需求拆解为五级层次结构：模块 → 子模块 → 功能 → 子功能
-2. 每个叶子节点逐行列出，父级通过合并行体现层级关系
-3. 为每一行编写简洁的功能描述
-4. 区分"设计类"（系统设计/数据建模）与"业务功能类"
-5. 参考行业标准功能拆解模式
+#### 4.2.1 拆解模型 — BFS 树形遍历
 
-输出格式 (平铺行，与最终报价单结构对齐):
+Decomposer 按 **树结构** 逐层生成报价行，处理顺序为 **BFS（广度优先）**：先完成当前层所有节点，再进入下一层。
+
+```
+                    ┌──── Module 层 ────┐
+                    │                    │
+              [可视化大屏]          [数据管理后台]
+                    │                    │
+              ┌──── Sub-Module 层 ──┐    │
+              │                     │    │
+        [运营看板]            [数据明细页]  │
+              │                     │    │
+        ┌── Function 层 ──┐        │     │
+        │                 │        │     │
+    [总营收]          [分公司营收]  │     │
+        │                 │        │     │
+    Sub-Function 层 (1:1 对 Description)
+        │                 │
+  [新兴市场营收总额]  [各分公司营收总额]
+        │                 │
+  Description            Description
+```
+
+**层级映射：**
+
+| 层级 | 说明 | 生成规则 |
+|------|------|---------|
+| **Module** | 一级分类 | 按业务领域或系统分层划分（如"可视化大屏"、"管理后台"） |
+| **Sub-Module** | 二级分类 | 在 Module 下按页面/子系统拆分 |
+| **Function** | 三级分类 | 在 Sub-Module 下按功能块拆分 |
+| **Sub-Function** | 四级分类 | 与 Description **一一对应**，是拆解的最小粒度 |
+| **Description** | 功能描述 | 与 Sub-Function 同时生成，描述具体实现内容 |
+
+**关键规则：**
+- Sub-Function 和 Description 是 **1:1 绑定** 的，不存在同一个 Sub-Function 对应多个 Description
+- Module/Sub-Module/Function 层涉及拆解（一对多），子节点数 ≥ 1
+- 同级值在表格渲染时通过 rowSpan 合并单元格
+- 每行标记 `category: "design"` 或 `"feature"`
+
+#### 4.2.2 BFS 逐层处理示意
+
+```
+输入: 需求简报
+      │
+      ▼
+Round 1 — Module 层: 生成所有一级模块
+  [可视化大屏, 数据管理后台, 移动端]
+      │
+      ▼
+Round 2 — Sub-Module 层: 对每个 Module 拆解子模块
+  可视化大屏 → [运营看板, 数据明细页, 系统概览]
+  数据管理后台 → [数据接入, 指标配置, 用户管理]
+  移动端 → [首页概览, 详情查看]
+      │
+      ▼
+Round 3 — Function 层: 对每个 Sub-Module 拆解功能
+  运营看板 → [总营收, 订单量, 客户增长]
+  数据接入 → [Excel导入, 数据库直连]
+  ...
+      │
+      ▼
+Round 4 — Sub-Function + Description 层: 叶子节点
+  总营收 → [新兴市场营收总额] + "统计截至最新的所有分公司当年总营收..."
+  总营收 → [各分公司营收总额] + "统计截至最新的每个分公司当年总营收..."
+  Excel导入 → [文件上传解析] + "支持.xlsx/.xls格式上传，自动识别表头..."
+  ...
+```
+
+**LLM 交互模式：** 每轮向 LLM 发送当前上下文 + 当前层级的父节点列表，要求输出下一层级的所有子节点。逐轮推进，直到 Sub-Function/Description 叶子层。
+
+#### 4.2.3 输出格式
+
+```json
 [
   {
     "seq": 1,
@@ -176,7 +416,9 @@ Output: 功能拆解清单 (平铺表格 JSON Array)
     "function": "框架建设",
     "sub_function": "框架建设",
     "description": "前后端基础技术栈选型架构搭建",
-    "category": "design"         // "design"=设计类, "feature"=业务功能类
+    "category": "design",
+    "trades": {},
+    "remark": ""
   },
   {
     "seq": 2,
@@ -185,7 +427,9 @@ Output: 功能拆解清单 (平铺表格 JSON Array)
     "function": "数据建模",
     "sub_function": "数据建模",
     "description": "数据建模",
-    "category": "design"
+    "category": "design",
+    "trades": {},
+    "remark": ""
   },
   {
     "seq": 3,
@@ -193,560 +437,513 @@ Output: 功能拆解清单 (平铺表格 JSON Array)
     "sub_module": "一级页面：新兴市场运营看板",
     "function": "总营收",
     "sub_function": "新兴市场运营营收总额",
-    "description": "统计截至最新的所有分公司的当年总营收...",
-    "category": "feature"
-  },
-  ...
+    "description": "统计截至最新的所有分公司的当年总营收，支持同比环比对比",
+    "category": "feature",
+    "trades": {},
+    "remark": ""
+  }
 ]
 ```
 
-#### Agent-3: 工时评估Agent (Effort Estimator)
+### 4.3 Estimator Agent（工时估算Agent）
 
 ```
-Input:  功能拆解清单 + 参与工种列表
-Output: 每行功能点的工种工时评估（填入对应工种列）
+Input:  QuotationRow[] (trades 为空) + 参与工种 + 工种人天单价 + 工时估算方案
+Output: QuotationRow[] (trades 已填充)
+```
 
-职责:
-1. 根据每行功能点的描述评估各工种所需人天
-2. 仅评估用户所选工种的工时（列动态生成，如仅选前后端则只输出后端、前端列）
-3. 系统设计类（category=design）单独按工种评估
-4. 考虑技术栈复杂度、第三方集成等因素
-5. 评估基准: 简单展示 0.5人天 / 含图表页面 1-2人天 / 复杂交互 2-3人天
+#### 4.3.1 估算方案 Skill 机制
 
-输出格式 (在原清单基础上追加工种列):
+Estimator 支持加载不同的 **工时估算方案 Skill**，以适应不同项目类型和报价策略。
+
+```
+lib/agent/plans/
+├── default-plan.md       # 默认标准估算方案
+├── agile-plan.md         # 敏捷开发估算方案
+├── fixed-bid-plan.md     # 固定总价估算方案
+├── data-platform-plan.md # 数据平台类项目专用方案
+├── ecommerce-plan.md     # 电商类项目专用方案
+└── mini-program-plan.md  # 小程序类项目专用方案
+```
+
+**方案 Skill 格式：**
+
+```markdown
+---
+name: data-platform-plan
+description: 数据平台/大屏类项目的工时估算方案
+适用于：数据看板、BI系统、数据中台等数据密集型项目
+---
+
+# 数据平台工时估算方案
+
+## 估算规则
+
+### 前端开发
+- 静态大屏页面（无交互）：0.5 人天/子功能
+- 交互式图表页（筛选/联动）：1-2 人天/子功能
+- 移动端适配页：1 人天/子功能
+- 设计类（design）不适用 → null
+
+### 后端开发
+- 标准 CRUD 接口：0.5 人天/子功能
+- 数据聚合计算接口：1-1.5 人天/子功能
+- 实时数据推送（WebSocket）：2 人天/子功能
+- 设计类（design）适用：按架构复杂度 2-5 人天
+
+### 测试
+- 功能测试：按前后端总工时的 20% 计算
+- 数据准确性测试：1-2 人天/核心计算功能
+
+## 复杂度调整因子
+- 第三方对接：+0.5 人天/对接方
+- 多数据源：+0.5 人天/数据源
+```
+
+#### 4.3.2 处理流程
+
+```
+接收: QuotationRow[] + selectedTrades + estimationPlanId
+      │
+      ▼
+┌─────────────────────────┐
+│ Step 1: 加载估算方案      │
+│ 根据 estimationPlanId    │
+│ 加载对应 Plan Skill       │
+│ 若未指定 → default-plan   │
+└───────────┬─────────────┘
+            ▼
+┌─────────────────────────┐
+│ Step 2: 遍历子功能        │
+│ 对每个 QuotationRow：     │
+│ • 读取 sub_function      │
+│ • 读取 description       │
+│ • 读取 category          │
+└───────────┬─────────────┘
+            ▼
+┌─────────────────────────┐
+│ Step 3: 按工种评估        │
+│ 对每个 selectedTrade：    │
+│ • 根据 Plan Skill 规则匹配 │
+│ • 考虑 category 约束      │
+│ • 输出人天（或 null）     │
+└───────────┬─────────────┘
+            ▼
+┌─────────────────────────┐
+│ Step 4: 汇总校验          │
+│ • 计算各工种总人天         │
+│ • 计算总报价              │
+│ • 与预算范围对比           │
+│ • 生成预算分析建议         │
+└───────────┬─────────────┘
+            ▼
+输出: QuotationRow[] (trades 已填充)
+```
+
+#### 4.3.3 估算约束
+
+| 约束 | 规则 |
+|------|------|
+| design 行 | 仅后端、设计工种填人天，其他工种填 null |
+| feature 行 | 前端/后端/设计填人天，测试/PM 可选 |
+| 不适用工种 | 填 `null`（前端渲染为 "-"） |
+| 人天粒度 | 0.5 人天为单位 |
+| design 范围 | 2-5 人天/行 |
+| feature 范围 | 0.5-3 人天/行 |
+| 用户所选工种 | 仅评估选中的工种，未选的不出现在 trades 中 |
+
+#### 4.3.4 输出示例
+
+```json
 [
   {
     "seq": 1,
     "module": "系统设计",
-    ...,
+    "sub_module": "前后端基础系统框架设计",
+    "function": "框架建设",
+    "sub_function": "框架建设",
+    "description": "前后端基础技术栈选型架构搭建",
+    "category": "design",
     "trades": {
-      "backend": 3,    // 仅当该工种被选中时存在
-      "frontend": 0,   // "-" 表示不适用，用 0 或 null
-      "testing": 0
-    }
+      "backend": 3,
+      "frontend": null,
+      "design": null,
+      "testing": null
+    },
+    "remark": ""
   },
   {
     "seq": 3,
     "module": "可视化大屏",
-    ...,
+    "sub_module": "一级页面：新兴市场运营看板",
+    "function": "总营收",
+    "sub_function": "新兴市场运营营收总额",
+    "description": "统计截至最新的所有分公司的当年总营收，支持同比环比对比",
+    "category": "feature",
     "trades": {
-      "backend": 0.5,
-      "frontend": 0.5,
-      "testing": 3
-    }
-  },
-  ...
+      "backend": 1.5,
+      "frontend": 1,
+      "design": 0.5,
+      "testing": 2
+    },
+    "remark": ""
+  }
 ]
 ```
 
-#### Agent-4: 报价生成Agent (Quotation Generator)
-
-```
-Input:  带工种工时的功能清单 + 预算范围
-Output: 最终报价单 Excel (.xlsx)，单一表格
-
-职责:
-1. 将功能清单 + 各工种工时整合为一张平铺报价表
-2. 同级单元格合并（模块/子模块/功能/子功能列按层级合并）
-3. 生成表头信息区：客户名称、项目名称、报价单位、报价时间
-4. 若预算紧张，生成"减配方案"建议在前端展示
-5. 输出标准 .xlsx 文件供前端展示和下载
-
-输出 Excel 结构 (单 Sheet):
-┌──────┬──────────┬────────────┬──────────┬──────────┬──────────────┬──────┬──────┬──────┬──────┐
-│ 序号 │ 模块     │ 子模块     │ 功能     │ 子功能   │ 功能描述     │ 后端 │ 前端 │ 测试 │ 备注 │
-├──────┼──────────┼────────────┼──────────┼──────────┼──────────────┼──────┼──────┼──────┼──────┤
-│  1   │ 系统设计 │ 前后端基础 │ 框架建设 │ 框架建设 │ 前后端基础.. │ 3    │ -    │ -    │ -    │
-├──────┤          │ 系统框架   ├──────────┼──────────┼──────────────┼──────┼──────┼──────┼──────┤
-│  2   │          │ 设计       │ 数据建模 │ 数据建模 │ 数据建模     │ 2    │ -    │ -    │ -    │
-├──────┼──────────┼────────────┼──────────┼──────────┼──────────────┼──────┼──────┼──────┼──────┤
-│  3   │ 可视化   │ 一级页面： │ 总营收   │ 新兴市场 │ 统计截至最.. │ 0.5  │ 0.5  │ 3    │ 概述  │
-│      │ 大屏     │ 新兴市场   │          │ 营收总额 │              │      │      │      │      │
-├──────┤          │ 运营看板   ├──────────┼──────────┼──────────────┼──────┼──────┼──────┼──────┤
-│  4   │          │            │ 分公司   │ 各个分公 │ 统计截至最.. │ -    │ 0.5  │ -    │ -    │
-│      │          │            │ 营收     │ 司营收..  │              │      │      │      │      │
-├──────┼──────────┼────────────┼──────────┼──────────┼──────────────┼──────┼──────┼──────┼──────┤
-│ ...  │ ...      │ ...        │ ...      │ ...      │ ...          │ ...  │ ...  │ ...  │ ...  │
-└──────┴──────────┴────────────┴──────────┴──────────┴──────────────┴──────┴──────┴──────┴──────┘
-
-注意事项:
-- 工种列根据用户选择动态生成（如选择3个工种则输出3列）
-- 不适用的工种填 "-"
-- 模块/子模块/功能/子功能同级值合并单元格
-- 表头区域显示客户名称、项目名称、报价单位、报价时间
-- 支持前端渲染为 shadcn Table 展示，同时提供 .xlsx 原始文件下载
-```
-
-表格固定列 + 动态列规则：
-
-| 列 | 固定/动态 | 说明 |
-|----|----------|------|
-| 序号 | 固定 | 自增编号 |
-| 模块 | 固定 | 一级分类 |
-| 子模块 | 固定 | 二级分类 |
-| 功能 | 固定 | 三级分类 |
-| 子功能 | 固定 | 四级分类 |
-| 功能描述 | 固定 | 详细说明 |
-| (工种列...) | **动态** | 根据用户所选工种生成，每工种一列，列名为工种名 |
-| 备注 | 固定 | 补充说明 |
-
-### 2.4 LangGraph State 定义
-
-```typescript
-// lib/agent/state.ts
-type TradeRole = "frontend" | "backend" | "design" | "testing" | "pm" | "devops" | "data" | "ai";
-
-interface QuotationRow {
-  seq: number;
-  module: string;
-  sub_module: string;
-  function_name: string;      // "功能" 列
-  sub_function: string;        // "子功能" 列
-  description: string;         // "功能描述" 列
-  trades: Record<TradeRole, number | null>;  // 各工种人天，null="不适用"
-  remark: string;              // "备注" 列
-}
-
-interface PipelineState {
-  // 输入层
-  rawText: string;
-  attachments: Array<{
-    name: string;
-    type: "pdf" | "word" | "excel";
-    content: string;
-  }>;
-  selectedTrades: TradeRole[];     // 用户选择的参与工种
-  budgetRange: [number, number];
-  modelProvider: string;
-
-  // 表头信息
-  customerName: string;            // 客户名称（从需求中提取或默认）
-  projectName: string;             // 项目名称
-
-  // Agent-1 产出
-  structuredBrief: string;         // Markdown 需求文档
-
-  // Agent-2 产出
-  rows: QuotationRow[];            // 功能拆解清单（平铺行）
-
-  // Agent-3 产出 (在原 rows 基础上填入 trades 人天)
-  // rows[].trades 被填充
-
-  // Agent-4 产出 (最终)
-  quotationFile: Buffer;           // .xlsx 文件内容
-
-  // 控制层
-  currentAgent: string;
-  error: string | null;
-}
-```
-
 ---
 
-## 3. 前端设计
+## 5. 数据流
 
-### 3.1 页面布局
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Header: 方案设计与报价Agent                              │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  ┌───────────────────────┐ ┌─────────────────────────┐  │
-│  │                       │ │                         │  │
-│  │    Agent 对话框       │ │    报价结果面板          │  │
-│  │    (AgentChat)        │ │    (ResultPanel)         │  │
-│  │                       │ │                         │  │
-│  │  • 对话消息           │ │  • 表头信息（客户/项目）     │  │
-│  │  • Thinking cards     │ │  • 单一报价表格             │  │
-│  │  • Progress 步骤      │ │  • 下载 .xlsx               │  │
-│  │                       │ │                         │  │
-│  │                       │ │                         │  │
-│  ├───────────────────────┤ │                         │  │
-│  │    InputBar            │ │                         │  │
-│  │  ┌────┐┌────┐┌────┐┌──┐│ │                         │  │
-│  │  │ 📎 ││ 🔧 ││ 💰 ││🤖││ │                         │  │
-│  │  └────┘└────┘└────┘└──┘│ │                         │  │
-│  └───────────────────────┘ └─────────────────────────┘  │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
-
-左右双栏布局：左侧为 Agent 对话框（60%），右侧为报价结果面板（40%）。
-
-### 3.2 InputBar Config Bar 设计
-
-Config Bar 位于输入框下方，使用 Agent Elements 的 `InputBar` 组件的 `leftActions` / `rightActions` 插槽实现。
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  [📝 请输入您的产品需求...                           ]  │
-├──────────────────────────────────────────────────────────┤
-│  ┌────────────┐ ┌──────────────┐ ┌─────────────┐        │
-│  │📎 上传文件 │ │🔧 参与工种  │ │💰 预算范围  │        │
-│  │ PDF/Word/  │ │ 前端 后端…  │ │ 5万 - 30万  │        │
-│  │ Excel      │ │              │ │ ──●──────   │        │
-│  └────────────┘ └──────────────┘ └─────────────┘        │
-│                                          ┌──────────┐   │
-│                                          │🤖 GPT-4o▾│   │
-│                                          └──────────┘   │
-│                                          ┌────────┐     │
-│                                          │  发送 ▶ │     │
-│                                          └────────┘     │
-└──────────────────────────────────────────────────────────┘
-```
-
-#### 3.2.1 文件上传菜单按钮
-
-使用 shadcn `DropdownMenu` + Agent Elements `AttachmentButton`：
-
-| 菜单项 | 接受格式 | 大小限制 |
-|--------|---------|---------|
-| PDF 文档 | `.pdf` | 10 MB |
-| Word 文档 | `.docx`, `.doc` | 10 MB |
-| Excel 表格 | `.xlsx`, `.xls` | 10 MB |
-
-上传后显示文件缩略卡片（复用 `FileAttachment` 组件），支持移除。
-
-#### 3.2.2 参与工种选择器 (TradeSelector)
-
-使用 shadcn `Popover` 组件实现，弹窗分为两个区域：顶部横向行业 Tab 栏，下方工种多选列表。
-
-**交互逻辑：**
-1. 点击按钮弹出 Popover
-2. 顶部为行业 Tab，横向滚动排列（如：电商、金融、医疗、教育、政务、IoT、SaaS、其他）
-3. 切换行业 Tab，下方工种列表随之更新（不同行业默认推荐工种不同）
-4. 工种以 Checkbox 列表展示，支持多选
-5. 至少选择一个工种，按钮上显示已选工种数量（如"🔧 参与工种 (3)"）
-
-```
-┌──────────────────────────────────────────┐
-│  行业: [电商] [金融] [医疗] [教育] [政务]│ ← 横向 Tab 栏
-│         [IoT] [SaaS] [其他]              │
-├──────────────────────────────────────────┤
-│  ☑ 前端开发     ¥2,000/人天             │
-│  ☑ 后端开发     ¥2,500/人天             │
-│  ☑ UI 设计      ¥2,000/人天             │
-│  ☐ 测试         ¥1,800/人天             │
-│  ☐ 项目管理     ¥3,000/人天             │
-│  ☐ DevOps       ¥2,800/人天             │
-│  ☐ 数据分析     ¥3,000/人天             │
-│  ☐ AI/算法      ¥4,000/人天             │
-├──────────────────────────────────────────┤
-│  [重置]                        [确定(3)] │
-└──────────────────────────────────────────┘
-```
-
-**行业默认推荐工种：**
-
-| 行业 | 默认选中工种 |
-|------|------------|
-| 电商 | 前端开发、后端开发、UI 设计、测试 |
-| 金融 | 后端开发、前端开发、测试、DevOps |
-| 医疗 | 后端开发、前端开发、测试、数据分析 |
-| 教育 | 前端开发、后端开发、UI 设计 |
-| 政务 | 后端开发、前端开发、项目管理、测试 |
-| IoT | 后端开发、前端开发、DevOps、AI/算法 |
-| SaaS | 前端开发、后端开发、UI 设计、测试、DevOps |
-| 其他 | 前端开发、后端开发（用户自行调整） |
-
-**组件结构：**
-
-```typescript
-// components/presales/trade-selector.tsx
-
-const INDUSTRIES = [
-  "电商", "金融", "医疗", "教育", "政务",
-  "IoT", "SaaS", "其他",
-] as const;
-
-const TRADES: TradeOption[] = [
-  { id: "frontend", label: "前端开发",   dailyRate: 2000, icon: Monitor },
-  { id: "backend",  label: "后端开发",   dailyRate: 2500, icon: Server },
-  { id: "design",   label: "UI 设计",    dailyRate: 2000, icon: Palette },
-  { id: "testing",  label: "测试",       dailyRate: 1800, icon: Bug },
-  { id: "pm",       label: "项目管理",   dailyRate: 3000, icon: Users },
-  { id: "devops",   label: "DevOps",     dailyRate: 2800, icon: Cloud },
-  { id: "data",     label: "数据分析",   dailyRate: 3000, icon: BarChart3 },
-  { id: "ai",       label: "AI/算法",    dailyRate: 4000, icon: Cpu },
-];
-
-const INDUSTRY_DEFAULTS: Record<string, string[]> = {
-  "电商": ["frontend", "backend", "design", "testing"],
-  // ... 其余行业
-};
-```
-
-#### 3.2.3 预算范围控件
-
-使用 shadcn `Slider`（双滑块，范围选择器）：
-
-```typescript
-const BUDGET_PRESETS = [
-  { label: "5万以下", range: [0, 50000] },
-  { label: "5-15万",  range: [50000, 150000] },
-  { label: "15-30万", range: [150000, 300000] },
-  { label: "30-50万", range: [300000, 500000] },
-  { label: "50万以上", range: [500000, 2000000] },
-];
-```
-
-双滑块支持自由拖动选择精确预算范围。选中的范围在标签中实时显示。
-
-#### 3.2.4 模型选择器 (ModelPicker)
-
-使用 Agent Elements 内置的 `ModelPicker` 组件，放置于 `rightActions` 区域，位于发送按钮左侧。
-
-```typescript
-const AVAILABLE_MODELS = [
-  { id: "deepseek-v3",  name: "DeepSeek",    version: "V3" },
-  { id: "gpt-4o",       name: "GPT-4o",      version: "latest" },
-  { id: "claude-4",     name: "Claude",      version: "4" },
-  { id: "qwen-max",     name: "Qwen",        version: "Max" },
-  { id: "glm-4-plus",   name: "GLM",         version: "4 Plus" },
-];
-```
-
-```tsx
-<ModelPicker
-  models={AVAILABLE_MODELS}
-  defaultValue="deepseek-v3"
-  onValueChange={(modelId) => setModelProvider(modelId)}
-/>
-```
-
-默认选中 DeepSeek V3。不同模型在管道各阶段可统一使用，也可按 Agent 节点差异化配置（v2 扩展）。
-
-#### 3.2.5 发送按钮
-
-Agent Elements `SendButton`，发送时将文本内容 + 附件 + 配置项（工种、预算、模型）一并提交。
-
-### 3.3 结果展示面板 (ResultPanel)
-
-右侧面板展示 Agent-4 生成的单一报价表格，渲染为 shadcn `Table`，并提供 `.xlsx` 原始文件下载。
-
-#### 3.3.1 表头信息区
-
-表格上方展示项目基本信息：
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  客户名称：重庆天玑晟智物联科技有限公司                     │
-│  项目名称：新兴市场项目功能清单（1期）                      │
-│  报价时间：2025-10-27                                     │
-│  报价单位：重庆酷小贝软件开发有限公司                       │
-├──────────────────────────────────────────────────────────┤
-│  [📥 下载报价单 (.xlsx)]    参与工种：后端 | 前端 | 测试   │
-└──────────────────────────────────────────────────────────┘
-```
-
-#### 3.3.2 报价表格
-
-使用 shadcn `Table` 组件渲染 Agent-4 输出的平铺报价数据。表格列分为**固定列**和**动态工种列**。
-
-**固定列：**
-
-| 列名 | 说明 | 特性 |
-|------|------|------|
-| 序号 | 自增编号 | 列宽 60px |
-| 模块 | 一级分类 | 同级值合并单元格 (rowSpan) |
-| 子模块 | 二级分类 | 同级值合并 |
-| 功能 | 三级分类 | 同级值合并 |
-| 子功能 | 四级分类 | 同级值合并 |
-| 功能描述 | 详细说明 | 列宽 300px，支持 tooltip 展开 |
-| 备注 | 补充信息 | 列宽 200px |
-
-**动态工种列：** 根据用户所选工种逐一生成列，列名为工种名，单元格值为人天数。
-
-**示例（工种选择：后端 + 前端 + 测试）：**
-
-```
-┌────┬────────┬──────────┬────────┬──────────┬────────────────┬──────┬──────┬──────┬──────┐
-│序号│ 模块   │ 子模块   │ 功能   │ 子功能   │ 功能描述       │ 后端 │ 前端 │ 测试 │ 备注 │
-├────┼────────┼──────────┼────────┼──────────┼────────────────┼──────┼──────┼──────┼──────┤
-│ 1  │系统设计│前后端基础│框架建设│框架建设  │前后端基础技术栈│  3   │  -   │  -   │  -   │
-│    │        │系统框架  │        │          │选型架构搭建    │      │      │      │      │
-├────┤        │设计      ├────────┼──────────┼────────────────┼──────┼──────┼──────┼──────┤
-│ 2  │        │          │数据建模│数据建模  │数据建模        │  2   │  -   │  -   │  -   │
-├────┼────────┼──────────┼────────┼──────────┼────────────────┼──────┼──────┼──────┼──────┤
-│ 3  │可视化  │一级页面：│总营收  │新兴市场  │统计截至最新的所│ 0.5  │ 0.5  │  3   │详见原│
-│    │大屏    │运营看板  │        │营收总额  │有分公司当年总..│      │      │      │型    │
-├────┤        │          ├────────┼──────────┼────────────────┼──────┼──────┼──────┼──────┤
-│ 4  │        │          │分公司  │各个分公司│统计截至最新的每│  -   │ 0.5  │  -   │  -   │
-│    │        │          │营收    │营收总额  │个分公司当年总..│      │      │      │      │
-├────┼────────┼──────────┼────────┼──────────┼────────────────┼──────┼──────┼──────┼──────┤
-│ …  │ …      │ …        │ …      │ …        │ …              │ …    │ …    │ …    │ …    │
-└────┴────────┴──────────┴────────┴──────────┴────────────────┴──────┴──────┴──────┴──────┘
-```
-
-**表格交互特性：**
-- **合并单元格**: 模块/子模块/功能/子功能列同级值自动合并 (`rowSpan`)
-- **列宽可调**: 用户可拖动列边界调整宽度
-- **固定表头**: 表头在滚动时固定可见
-- **不适用标识**: 某工种不参与的功能点显示 "-"
-- **下载按钮**: 表格上方提供 .xlsx 文件下载，包含完整合并单元格和格式
-
-#### 3.3.3 导出
-
-后端 Agent-4 直接生成 `.xlsx` 文件，前端同时支持：
-- **直接下载**: 下载服务端生成的原始 .xlsx（含合并单元格、格式化）
-- **前端渲染**: 将 JSON 数据渲染为 shadcn Table，供在线预览
-
----
-
-## 4. 数据流
+### 5.1 首次报价流程
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
     participant F as 前端 (AgentChat)
-    participant API as /api/chat
-    participant PP as 预处理
-    participant P1 as Agent-1 文档解析
-    participant P2 as Agent-2 需求拆解
-    participant P3 as Agent-3 工时评估
-    participant P4 as Agent-4 报价生成
-    participant DB as 历史数据库
+    participant M as 主 Agent
+    participant P as File Parser
+    participant G as Grill-me
+    participant D as Decomposer
+    participant E as Estimator
 
-    U->>F: 输入需求 + 上传文件 + 选择工种/预算/模型
-    F->>API: POST { messages, attachments, trades, budget, model }
-    API->>PP: 文件解析 & 参数提取
-    PP->>P1: 结构化需求描述
-    P1-->>F: (stream) 解析进度
-    P1->>P2: 需求文档
-    P2-->>F: (stream) 拆解进度
-    P2->>P3: 功能清单 JSON
-    P3-->>F: (stream) 评估进度
-    P3->>P4: 工时评估 JSON
-    P4-->>F: (stream) 报价生成中
-    P4->>DB: 保存报价记录
-    P4-->>F: 完整报价表 JSON
+    U->>F: 输入需求 + 上传文件 + 选择工种/预算
+    F->>M: 转发用户输入
+
+    Note over M: Phase: parsing
+    M->>P: 调用 File Parser (文件 + 文字)
+    P-->>M: 结构化需求简报
+
+    Note over M: Phase: grilling
+    M->>G: 分析简报完整性
+    alt 存在模糊点
+        G-->>M: 生成澄清问题
+        M-->>F: 向用户提问
+        U->>F: 回答
+        F->>M: 转发回答
+        M->>G: 更新上下文
+    end
+
+    Note over M: Phase: decomposing
+    M->>D: 调用 Decomposer (需求简报)
+    D-->>M: QuotationRow[] (trades 为空)
+
+    Note over M: Phase: estimating (强制调用)
+    M->>E: 调用 Estimator (rows + 工种 + 方案)
+    E-->>M: QuotationRow[] (trades 已填充)
+
+    Note over M: Phase: complete
+    M-->>F: 完整报价表 JSON
     F->>U: 展示报价表格
-    U->>F: 点击导出
-    F->>U: 下载 Excel/PDF 文件
 ```
 
-### 4.1 流式输出策略
+### 5.2 用户反馈重跑流程
 
-使用 Vercel AI SDK 的 `streamText` 能力，在 LangGraph pipeline 的每个节点完成后向前端发送增量更新：
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant M as 主 Agent
+    participant D as Decomposer
+    participant E as Estimator
 
-```typescript
-// API Route 伪代码
-const pipeline = createPipeline();
+    U->>M: "数据导出功能漏了"
 
-for await (const event of pipeline.stream(input)) {
-  switch (event.type) {
-    case "agent_start":
-      writer.write(createToolCallPart("plan", { step: event.agent }));
-      break;
-    case "agent_progress":
-      writer.write(createToolCallPart("thinking", { content: event.message }));
-      break;
-    case "agent_complete":
-      writer.write(createToolResultPart(event.output));
-      break;
-    case "pipeline_complete":
-      writer.write(createAssistantMessage(event.quotation));
-      break;
-  }
-}
+    Note over M: 判断: 结构变更
+    Note over M: restartPoint = decomposer
+
+    M->>D: 重新调用 Decomposer (含用户反馈)
+    D-->>M: 更新后的 QuotationRow[]
+
+    Note over M: 链式触发 Estimator
+    M->>E: 重新调用 Estimator
+    E-->>M: 更新后的报价表
+
+    M-->>U: 更新后的报价表格
 ```
 
-前端通过 `toolRenderers` 自定义渲染每种事件类型的 UI 卡片。
+### 5.3 流式输出策略
+
+主 Agent 通过 SSE 向前端实时推送进度事件，使用 AI SDK UI Message Stream 协议：
+
+```
+主 Agent 阶段              → 前端展示
+─────────────────────────────────────────
+File Parser (parsing)      → "正在解析文件..."
+Grill-me (grilling)        → 提问卡片（QuestionTool）
+Decomposer (decomposing)   → "正在拆解功能清单..."
+  每层拆解完成              → 进度更新（PlanTool）
+Estimator (estimating)     → "正在估算工时..."
+  每个子功能评估完成         → 进度更新
+Complete                   → 完整报价表渲染
+
+事件类型:
+  agent_start     → 阶段开始
+  agent_progress  → 进度信息
+  agent_complete  → 阶段完成（含结构化输出）
+  pipeline_complete → 全流程完成（含完整报价表）
+```
 
 ---
 
-## 5. 目录结构
+## 6. 状态与类型定义
+
+### 6.1 QuotationRow
+
+```typescript
+interface QuotationRow {
+  seq: number;                        // 序号
+  module: string;                     // 一级: 模块
+  sub_module: string;                 // 二级: 子模块
+  function: string;                   // 三级: 功能
+  sub_function: string;               // 四级: 子功能 (与 description 1:1)
+  description: string;                // 功能描述
+  category: "design" | "feature";     // 分类
+  trades: Partial<Record<TradeRole, number | null>>;  // 各工种人天, null=不适用
+  remark: string;                     // 备注
+}
+
+type TradeRole = "frontend" | "backend" | "design" | "testing"
+                | "pm" | "devops" | "data" | "ai";
+```
+
+### 6.2 子 Agent 接口
+
+每个子 Agent 遵循统一接口模式：
+
+```typescript
+interface SubAgent<Input, Output> {
+  /** Agent 标识 */
+  readonly name: string;
+
+  /** 执行 Agent 任务，流式推送进度 */
+  execute(
+    input: Input,
+    context: SubAgentContext,
+  ): Promise<Output>;
+}
+
+interface SubAgentContext {
+  /** LLM 调用函数 */
+  runLlm: RunLlmFn;
+
+  /** 流式进度推送 */
+  emit: (event: PipelineEvent) => void;
+
+  /** Agent 可用工具 */
+  tools?: AgentTool[];
+
+  /** 日志记录器 */
+  logger: Logger;
+}
+```
+
+---
+
+## 7. 目录结构
 
 ```
 presales/
 ├── app/
 │   ├── api/
-│   │   └── chat/
-│   │       └── route.ts            # API Route: 对话入口
+│   │   ├── chat/
+│   │   │   └── route.ts                # API Route: 对话入口（SSE stream）
+│   │   └── quotation/
+│   │       └── export/
+│   │           └── route.ts            # API Route: xlsx 导出
 │   ├── layout.tsx
-│   ├── page.tsx                    # 主页面
+│   ├── page.tsx                        # 主页面
 │   └── globals.css
 ├── components/
-│   ├── agent-elements/             # Agent Elements 组件 (shadcn registry)
-│   ├── ui/                         # shadcn 基础 UI 组件
+│   ├── agent-elements/                 # Agent Elements 组件 (shadcn registry)
+│   ├── ui/                             # shadcn 基础 UI 组件
 │   ├── presales/
-│   │   ├── agent-chat-panel.tsx    # 左侧 Agent 对话框面板
-│   │   ├── config-bar.tsx          # Config Bar (文件上传/工种/预算/模型)
-│   │   ├── file-upload-menu.tsx    # 文件上传下拉菜单
-│   │   ├── trade-selector.tsx      # 参与工种选择器 (行业Tab + 多选)
-│   │   ├── budget-slider.tsx       # 预算范围双滑块
-│   │   ├── model-picker.tsx        # 模型选择器 (封装Agent Elements ModelPicker)
-│   │   ├── result-panel.tsx        # 右侧报价结果面板 (表格渲染)
-│   │   ├── quotation-table.tsx     # 报价表格 (固定列 + 动态工种列)
-│   │   ├── quotation-header.tsx    # 表头信息区 (客户/项目/时间)
-│   │   └── export-buttons.tsx      # 下载按钮组 (.xlsx)
+│   │   ├── agent-chat-panel.tsx        # 左侧 Agent 对话框面板
+│   │   ├── config-bar.tsx              # Config Bar
+│   │   ├── file-upload-menu.tsx        # 文件上传下拉菜单
+│   │   ├── trade-selector.tsx          # 参与工种选择器
+│   │   ├── budget-slider.tsx           # 预算范围双滑块
+│   │   ├── model-picker.tsx            # 模型选择器
+│   │   ├── result-panel.tsx            # 右侧报价结果面板
+│   │   ├── quotation-table.tsx         # 报价表格
+│   │   ├── quotation-header.tsx        # 表头信息区
+│   │   └── export-buttons.tsx          # 下载按钮组
 │   └── ...
 ├── lib/
 │   ├── agent/
-│   │   ├── pipeline.ts             # LangGraph pipeline 定义
-│   │   ├── state.ts                # Pipeline state 类型
-│   │   ├── nodes/
-│   │   │   ├── parser.ts           # Agent-1: 文档解析
-│   │   │   ├── decomposer.ts       # Agent-2: 需求拆解
-│   │   │   ├── estimator.ts        # Agent-3: 工时评估
-│   │   │   └── quoter.ts           # Agent-4: 报价生成
+│   │   ├── master/
+│   │   │   ├── master-agent.ts         # 主 Agent: 用户对话 + 调度逻辑
+│   │   │   ├── grill-me.ts             # Grill-me Skill: 模糊需求澄清
+│   │   │   └── dispatch.ts             # 子 Agent 调度器: 链式调用 + 一致性保证
+│   │   ├── sub-agents/
+│   │   │   ├── file-parser/
+│   │   │   │   ├── index.ts            # File Parser 子 Agent
+│   │   │   │   └── tools.ts            # 解析工具注册 (image/pdf/word/excel)
+│   │   │   ├── decomposer/
+│   │   │   │   ├── index.ts            # Decomposer 子 Agent
+│   │   │   │   └── tree-builder.ts     # BFS 树形拆解器
+│   │   │   └── estimator/
+│   │   │       ├── index.ts            # Estimator 子 Agent
+│   │   │       └── plan-loader.ts      # 估算方案 Skill 加载器
+│   │   ├── state.ts                    # MasterState, QuotationRow, SubAgent 接口
+│   │   ├── llm.ts                      # LLM 工厂 (RunLlmFn, resolveLlm)
+│   │   ├── mock-llm.ts                 # 确定性 Mock LLM
 │   │   ├── tools/
-│   │   │   ├── file-parser.ts      # 文件解析工具集
-│   │   │   ├── xlsx-generator.ts   # .xlsx 生成工具 (openpyxl/csv)
-│   │   │   └── template.ts         # 输出模板
-│   │   └── prompts/
-│   │       ├── parser.md           # Agent-1 系统提示
-│   │       ├── decomposer.md       # Agent-2 系统提示
-│   │       ├── estimator.md        # Agent-3 系统提示
-│   │       └── quoter.md           # Agent-4 系统提示
-│   ├── utils.ts
-│   └── constants.ts                # 工种列表、行业默认配置、人天单价常量
+│   │   │   ├── file-parser.ts          # 文件解析工具集 (PDF/Word/Excel/Image)
+│   │   │   └── xlsx-generator.ts       # .xlsx 生成工具 (exceljs)
+│   │   ├── prompts/
+│   │   │   ├── master-system.md        # 主 Agent 系统提示
+│   │   │   ├── grill-me.md             # Grill-me 提示模板
+│   │   │   ├── file-parser.md          # File Parser 系统提示
+│   │   │   ├── decomposer.md           # Decomposer 系统提示
+│   │   │   └── estimator.md            # Estimator 系统提示
+│   │   ├── plans/                      # 工时估算方案 Skills
+│   │   │   ├── default-plan.md         # 默认标准估算
+│   │   │   ├── data-platform-plan.md   # 数据平台类
+│   │   │   ├── ecommerce-plan.md       # 电商类
+│   │   │   └── mini-program-plan.md    # 小程序类
+│   │   └── __tests__/                  # 集成测试
+│   ├── constants.ts                    # 工种列表、行业配置、人天单价
+│   ├── session-config.ts               # 会话配置（工种/预算/模型持久化）
+│   ├── logger.ts                       # 结构化日志
+│   └── presales-context.tsx            # React Context
 ├── docs/
-│   └── design.md                   # 本文档
+│   └── design.md                       # 本文档
 └── ...
 ```
 
 ---
 
-## 6. 关键技术决策
+## 8. 关键技术决策
 
-### 6.1 为什么选择串行 Pipeline？
+### 8.1 为什么选择主从架构而非纯串行 Pipeline？
 
-| 对比维度 | 串行 Pipeline ✅ | 并行 Agent 协作 |
-|---------|-----------------|----------------|
-| 输出确定性 | 高 — 每阶段有明确的前置依赖 | 低 — 并发合并需额外协调逻辑 |
-| 调试可观测性 | 高 — 每阶段可独立检查 | 低 — 竞态条件不易重现 |
-| 用户等待体验 | 可接受 — 流式展示每阶段进度 | 理论更快但不可控 |
-| 上下文一致性 | 强 — 前一阶段产出精确传入后续 | 弱 — 需共享状态同步 |
+| 对比维度 | 主从架构 | 纯串行 Pipeline |
+|---------|---------|----------------|
+| 用户交互 | 主 Agent 可直接对话，灵活处理反馈 | Pipeline 是单向的，交互需 hack |
+| 重跑灵活性 | 可从任意环节重启调度链 | 只能从头跑 |
+| 状态一致性 | 主 Agent 统一管理报价表状态 | 各节点各自管理状态片段 |
+| 扩展性 | 新增子 Agent 只需注册调度规则 | 新增节点需改动整个图结构 |
+| 用户反馈处理 | 主 Agent 自然理解并路由反馈 | 需外部判断 + 重新创建 Pipeline |
+| 调试可观测性 | 主 Agent 可独立监控每个子 Agent | 需通过 LangGraph 状态追踪 |
 
-**决策**: 当前场景中需求拆解依赖文档解析、报价依赖工时评估，天然串行依赖。选择串行 Pipeline 确保准确性。
+**决策**: 当前场景需要多轮对话和用户反馈处理，主从架构提供更好的交互灵活性和状态一致性。
 
-### 6.2 为什么使用 LangGraph 而非自定义编排？
+### 8.2 为什么保留 LangGraph？
 
-- **状态管理**: LangGraph 内置 `StateGraph`，支持类型化状态在节点间流转
-- **流式支持**: 原生支持 `stream()` 方法，逐节点 yield 事件
-- **错误恢复**: 内置 `Checkpointer` 支持状态持久化与重试
-- **生态兼容**: 与 LangChain tools、prompts 无缝集成
-- **可扩展性**: 未来可从串行扩展为条件分支（如不同文件类型走不同解析节点）
+- **调度编排**: 主 Agent 的调度链本质仍是状态图，LangGraph 提供成熟的 StateGraph 基础设施
+- **流式支持**: 原生 `stream()` + `config.writer()` 支持进度推送
+- **可降级**: 如果主从调度过于复杂，可退回到 LangGraph 的子图模式
 
-### 6.3 报价精度策略
+### 8.3 BFS 拆解 vs 一次性生成
 
-| 层级 | 策略 | 说明 |
-|------|------|------|
-| L1: LLM 评估 | 大模型根据功能描述估算工时 | 适合模糊需求，准确度 ~70% |
-| L2: 历史匹配 | 向量检索相似历史项目 | 提高同类项目准确度 |
-| L3: 工种校准 | 根据用户所选工种动态生成报价维度，未选工种不参与计算 | 确保报价相关性 |
-| L4: 人工审核 | 最终报价标注"AI生成，仅供参考" | 风险免责 |
+| 对比维度 | BFS 逐层拆解 | 一次性生成全部 |
+|---------|------------|--------------|
+| 层级一致性 | 同层节点一起决策，结构更均衡 | 可能深浅不一 |
+| LLM 输出控制 | 每轮输出量可控，不易截断 | 长输出易被截断 |
+| 用户参与 | 可在层间插入用户确认（未来扩展） | 只能全部生成后确认 |
+| 生成速度 | 多轮调用略慢 | 单轮调用更快 |
+
+**决策**: 选择 BFS 逐层拆解，牺牲少量速度换取结构质量和可控性。
+
+### 8.4 估算方案 Skill 化
+
+将估算规则从硬编码的 Prompt 中抽离为可插拔的 Skill 文件：
+
+| 优势 | 说明 |
+|------|------|
+| 可配置 | 不同项目类型加载不同方案，无需改代码 |
+| 可积累 | 每个成功项目的估算经验可沉淀为新方案 |
+| 可组合 | 方案间可引用基础规则 + 覆盖特定行业规则 |
+| 可审查 | 方案文件独立可读，方便售前专家审核校准 |
 
 ---
 
-## 7. 后续扩展方向 (Out of scope for v1)
+## 9. 前后端交互协议
 
-- [ ] 历史报价数据积累 → 构建向量检索库提升精度
-- [ ] 人天单价动态调整（根据市场行情、技术稀缺度）
-- [ ] 多轮对话澄清模糊需求（Agent 主动提问）
-- [ ] 报价对比模式（2-3 个方案供用户选择）
-- [ ] 技术方案推荐（基于需求自动推荐技术栈）
-- [ ] 团队匹配（根据工时推荐所需人员配置）
-- [ ] 报价审批工作流（内部审核后发送给客户）
+### 9.1 主 Agent SSE 事件流
+
+```
+data: {"type":"text-start","id":"msg-xxx"}
+
+// ── File Parser 阶段 ──
+data: {"type":"tool-input-start","toolCallId":"tc-1","toolName":"subagent_file_parser"}
+data: {"type":"tool-input-delta","toolCallId":"tc-1","inputTextDelta":"正在解析文件..."}
+data: {"type":"tool-output-available","toolCallId":"tc-1","output":"{...结构化简报...}"}
+
+// ── Grill-me 阶段（如有） ──
+data: {"type":"tool-input-start","toolCallId":"tc-2","toolName":"grill_me"}
+data: {"type":"tool-input-delta","toolCallId":"tc-2","inputTextDelta":"我有几个问题需要确认..."}
+// 用户回答后继续...
+
+// ── Decomposer 阶段 ──
+data: {"type":"tool-input-start","toolCallId":"tc-3","toolName":"subagent_decomposer"}
+data: {"type":"tool-input-delta","toolCallId":"tc-3","inputTextDelta":"正在拆解 Module 层..."}
+data: {"type":"tool-input-delta","toolCallId":"tc-3","inputTextDelta":"正在拆解 Sub-Module 层..."}
+data: {"type":"tool-output-available","toolCallId":"tc-3","output":"{...QuotationRow[]...}"}
+
+// ── Estimator 阶段 ──
+data: {"type":"tool-input-start","toolCallId":"tc-4","toolName":"subagent_estimator"}
+data: {"type":"tool-input-delta","toolCallId":"tc-4","inputTextDelta":"正在估算工时 (1/12)..."}
+data: {"type":"tool-input-delta","toolCallId":"tc-4","inputTextDelta":"正在估算工时 (6/12)..."}
+data: {"type":"tool-output-available","toolCallId":"tc-4","output":"{...完整报价表...}"}
+
+// ── 完成 ──
+data: {"type":"text-end","id":"msg-xxx"}
+data: {"type":"finish","finishReason":"stop"}
+```
+
+### 9.2 前端 toolRenderers 映射
+
+```tsx
+// agent-chat-panel.tsx
+<AgentChat
+  toolRenderers={{
+    Subagent_File_Parser: SubagentTool,   // 复用 Agent Elements SubagentTool
+    Grill_Me: QuestionTool,               // 复用 Agent Elements QuestionTool
+    Subagent_Decomposer: SubagentTool,
+    Subagent_Estimator: SubagentTool,
+  }}
+/>
+```
+
+---
+
+## 10. 迁移路线图
+
+### Phase 1: 核心架构（当前 → 主从）
+
+- [ ] 实现 Master Agent（替代 LangGraph Pipeline）
+- [ ] 实现 File Parser 子 Agent（从 parser node 迁移）
+- [ ] 实现 Decomposer 子 Agent（从 decomposer node 迁移 + BFS 拆解）
+- [ ] 实现 Estimator 子 Agent（从 estimator node + quoter node 合并迁移）
+- [ ] 实现 Grill-me Skill
+- [ ] 实现用户反馈重跑逻辑
+- [ ] 更新 SSE 事件协议
+- [ ] 更新前端 toolRenderers 映射
+- [ ] 更新 Mock LLM 各 agent 输出
+
+### Phase 2: 估算方案 Skills
+
+- [ ] 设计估算方案 Skill 格式规范
+- [ ] 实现 plan-loader.ts（方案加载与解析）
+- [ ] 编写 default-plan.md 方案
+- [ ] 编写常用行业方案（data-platform, ecommerce, mini-program）
+- [ ] 方案选择 UI（或主 Agent 自动推荐）
+
+### Phase 3: 增强交互
+
+- [ ] Decomposer 层间用户确认（可选暂停 + 调整）
+- [ ] 多方对比方案（快速生成 2-3 个不同拆解/估算方案）
+- [ ] 历史方案复用（基于历史项目快速生成）
+
+---
+
+## 11. 后续扩展方向
+
+- [ ] **方案审核工作流**: 生成报价后内部审核，审批通过后发送给客户
+- [ ] **团队匹配**: 根据工时估算推荐所需人员配置
+- [ ] **历史报价积累**: 构建向量检索库提升估算精度
+- [ ] **技术方案推荐**: 基于需求自动推荐技术栈
+- [ ] **多轮对话增强**: Grill-me 支持更智能的追问策略
+- [ ] **人天单价动态调整**: 根据市场行情、技术稀缺度自动校准
+- [ ] **报价版本管理**: 支持多版本报价对比和回溯

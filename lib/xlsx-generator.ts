@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import type { QuotationRow, QuotationHeader } from "@/lib/agent/state";
+import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 import { TRADE_LABELS } from "@/lib/constants";
 

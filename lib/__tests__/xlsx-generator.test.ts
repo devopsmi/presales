@@ -1,6 +1,6 @@
 import ExcelJS from "exceljs";
 import { generateQuotationXlsx } from "../xlsx-generator";
-import type { QuotationRow, QuotationHeader } from "@/lib/agent/state";
+import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 
 async function testAll() {

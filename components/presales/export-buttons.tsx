@@ -3,7 +3,7 @@
 import { Download, FileSpreadsheet, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { QuotationRow, QuotationHeader } from "@/lib/agent/state";
+import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 import { useState } from "react";
 import log from "@/lib/logger";

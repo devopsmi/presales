@@ -1,41 +1,65 @@
 "use client";
 
-import { useEffect, useMemo, useCallback } from "react";
+import { useEffect, useMemo, useCallback, useRef } from "react";
 import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
 import { MessageList } from "@/components/agent-elements/message-list";
 import { InputBar } from "@/components/agent-elements/input-bar";
 import type { AttachedFile } from "@/components/agent-elements/input-bar";
 import { FileUploadMenu } from "./file-upload-menu";
 import { TradeSelector } from "./trade-selector";
-import { BudgetSlider } from "./budget-slider";
+import { BudgetInput } from "./budget-input";
 import { ModelPicker } from "./model-picker";
+import { VendorNameInput } from "./vendor-name-input";
 import { usePresales } from "@/lib/presales-context";
-import type { QuotationRow, QuotationHeader } from "@/lib/agent/state";
+import { serializeFiles } from "@/lib/file-utils";
+import type { QuotationRow, QuotationHeader } from "@/lib/types";
+import type { TradeRole } from "@/lib/constants";
 
-function extractQuotationFromText(text: string): { header: QuotationHeader; rows: QuotationRow[] } | null {
-  const startIdx = text.indexOf("__QUOTATION__");
-  if (startIdx === -1) return null;
-  const endIdx = text.indexOf("__END_QUOTATION__", startIdx + 13);
-  if (endIdx === -1) return null;
+interface QuotationExtract {
+  header: QuotationHeader;
+  rows: QuotationRow[];
+  trades: TradeRole[];
+}
+
+function extractQuotationFromToolPart(
+  part: { type: string; state?: string; output?: unknown },
+): QuotationExtract | null {
+  // Check both new (subagent_estimator) and legacy (pipeline_quoter) tool names
+  const isQuotationTool =
+    (part.type === "tool-subagent_estimator" || part.type === "tool-pipeline_quoter");
+  if (!isQuotationTool || part.state !== "output-available") {
+    return null;
+  }
   try {
-    const data = JSON.parse(text.slice(startIdx + 13, endIdx));
-    if (data.header && Array.isArray(data.rows)) return data;
-  } catch { }
+    const output = typeof part.output === "string" ? JSON.parse(part.output) : part.output;
+    if (output && typeof output === "object" && "header" in output && Array.isArray((output as any).rows)) {
+      const data = output as { header: QuotationHeader; rows: QuotationRow[]; trades?: TradeRole[] };
+      const trades: TradeRole[] = Array.isArray(data.trades) && data.trades.length > 0
+        ? data.trades
+        : deriveTradesFromRows(data.rows);
+      return { header: data.header, rows: data.rows, trades };
+    }
+  } catch {}
   return null;
 }
 
+function deriveTradesFromRows(rows: QuotationRow[]): TradeRole[] {
+  const keys = new Set<TradeRole>();
+  for (const row of rows) {
+    for (const key of Object.keys(row.trades) as TradeRole[]) {
+      keys.add(key);
+    }
+  }
+  return Array.from(keys);
+}
+
 function extractQuotationFromMessages(
-  messages: Array<{ content?: string; parts?: Array<{ type: string; text?: string }> }>,
-): { header: QuotationHeader; rows: QuotationRow[] } | null {
+  messages: Array<{ parts?: Array<{ type: string; state?: string; output?: unknown }> }>,
+): QuotationExtract | null {
   for (const msg of [...messages].reverse()) {
     for (const part of msg.parts ?? []) {
-      if (part.type === "text" && part.text) {
-        const q = extractQuotationFromText(part.text);
-        if (q) return q;
-      }
-    }
-    if (msg.content) {
-      const q = extractQuotationFromText(msg.content);
+      const q = extractQuotationFromToolPart(part);
       if (q) return q;
     }
   }
@@ -44,21 +68,46 @@ function extractQuotationFromMessages(
 
 export function AgentChatPanel() {
   const {
-    selectedTrades,
-    budgetRange,
-    modelProvider,
+    sessionId,
     attachments,
     removeAttachment,
+    setAttachments,
+    setQuotationResult,
+    setQuotationTrades,
     setQuotation,
     setHeader,
+    syncConfig,
   } = usePresales();
 
+  const filesRef = useRef<File[]>([]);
+  useEffect(() => {
+    filesRef.current = attachments;
+  }, [attachments]);
+
+  // filesRef is read at fetch call time (async), not during render — the refs lint is a false positive here
+  // eslint-disable-next-line react-hooks/refs
+  const transport = new DefaultChatTransport({
+    body: { sessionId },
+    async fetch(url, init) {
+      if (init?.body) {
+        const bodyObj = JSON.parse(init.body as string);
+        const files = await serializeFiles(filesRef.current);
+        if (files.length > 0) {
+          bodyObj.files = files;
+          init.body = JSON.stringify(bodyObj);
+        }
+        filesRef.current = [];
+      }
+      return fetch(url, init);
+    },
+  });
+
   const { messages, status, sendMessage, stop } = useChat({
+    transport,
     onFinish: (options) => {
       const q = extractQuotationFromMessages([options.message]);
       if (q) {
-        setHeader(q.header);
-        setQuotation(q.rows);
+        setQuotationResult(q.header, q.rows, q.trades);
       }
     },
   });
@@ -88,26 +137,22 @@ export function AgentChatPanel() {
       messages as Array<{ content?: string; parts?: Array<{ type: string; text?: string }> }>,
     );
     if (q) {
-      setHeader(q.header);
-      setQuotation(q.rows);
+      setQuotationResult(q.header, q.rows, q.trades);
     }
-  }, [messages, setHeader, setQuotation]);
+  }, [messages, setQuotationResult]);
 
   useEffect(() => {
     if (status === "ready" && messages.length === 0) {
       setQuotation(null);
       setHeader(null);
+      setQuotationTrades(null);
     }
-  }, [status, messages.length, setQuotation, setHeader]);
+  }, [status, messages.length, setQuotation, setHeader, setQuotationTrades]);
 
-  function handleSend(message: { role: "user"; content: string }) {
-    const configMeta = JSON.stringify({
-      trades: selectedTrades,
-      budgetRange,
-      model: modelProvider,
-    });
-    const fullText = `__PRESALES_CONFIG__${configMeta}__END_CONFIG__\n${message.content}`;
-    sendMessage({ text: fullText });
+  async function handleSend(message: { role: "user"; content: string }) {
+    await syncConfig();
+    sendMessage({ text: message.content });
+    setAttachments([]);
   }
 
   return (
@@ -127,7 +172,8 @@ export function AgentChatPanel() {
           <div className="flex items-center gap-1 flex-wrap">
             <FileUploadMenu />
             <TradeSelector />
-            <BudgetSlider />
+            <BudgetInput />
+            <VendorNameInput />
             <ModelPicker />
           </div>
         }

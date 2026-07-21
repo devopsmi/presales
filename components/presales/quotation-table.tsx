@@ -1,6 +1,6 @@
 "use client";
 
-import type { QuotationRow } from "@/lib/agent/state";
+import type { QuotationRow } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 import { TRADE_LABELS } from "@/lib/constants";
 import {

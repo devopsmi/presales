@@ -42,13 +42,6 @@ export const BUDGET_PRESETS = [
   { label: "50万以上", range: [500000, 2000000] as const },
 ];
 
-export const AVAILABLE_MODELS = [
-  { id: "deepseek-v3", name: "DeepSeek", version: "V3" },
-  { id: "gpt-4o", name: "GPT-4o", version: "latest" },
-  { id: "claude-4", name: "Claude", version: "4" },
-  { id: "qwen-max", name: "Qwen", version: "Max" },
-  { id: "glm-4-plus", name: "GLM", version: "4 Plus" },
-];
 
 export const MAX_FILE_SIZE_MB = 10;
 export const DEFAULT_MODEL = "deepseek-v3";
