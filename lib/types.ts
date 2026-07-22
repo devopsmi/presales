@@ -56,7 +56,7 @@ export interface PipelineInput {
   budgetRange: [number, number];
   modelProvider: string;
   modelConfigs: ModelConfig[];
-  llmProvider: "mock" | "openai";
+  llmProvider: "openai" | "anthropic";
   vendorName?: string;
 }
 
@@ -67,6 +67,7 @@ export interface PipelineInput {
 export interface SseMessage {
   type:
     | "text-start"
+    | "text-delta"
     | "text-end"
     | "finish"
     | "error"
@@ -79,5 +80,6 @@ export interface SseMessage {
   toolCallId?: string;
   toolName?: string;
   inputTextDelta?: string;
+  delta?: string;
   output?: string;
 }

@@ -72,6 +72,12 @@ function calculateDiffStats(oldString: string, newString: string) {
   return { addedLines, removedLines };
 }
 
+function safeInput(part: any): string {
+  const inp = part.input;
+  if (!inp) return "";
+  return typeof inp === "string" ? inp : "";
+}
+
 export const toolRegistry: Record<string, ToolMeta> = {
   // ── New Master-Slave Architecture tool names ──
   "tool-subagent_file_parser": {
@@ -91,7 +97,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (o?.customerName) return `客户: ${o.customerName}`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },
@@ -112,7 +118,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (typeof o?.questionCount === "number") return `${o.questionCount} 个补充问题`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },
@@ -133,7 +139,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (typeof o?.rowCount === "number") return `${o.rowCount} 个功能项`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },
@@ -155,7 +161,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (Array.isArray(o?.rows)) return `${o.rows.length} 项报价`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },
@@ -177,7 +183,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (o?.customerName) return `客户: ${o.customerName}`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },
@@ -198,7 +204,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (typeof o?.rowCount === "number") return `${o.rowCount} 个功能项`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },
@@ -219,7 +225,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (typeof o?.rowCount === "number") return `${o.rowCount} 项已评估`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },
@@ -241,7 +247,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
           if (Array.isArray(o?.rows)) return `${o.rows.length} 项报价`;
         } catch {}
       }
-      return part.input || "";
+      return safeInput(part);
     },
     variant: "simple" as const,
   },

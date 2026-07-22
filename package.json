@@ -9,6 +9,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test:xlsx": "tsx lib/__tests__/xlsx-generator.test.ts",
+    "test:agent": "tsx lib/agent/__tests__/pipeline.test.ts",
     "test": "pnpm test:xlsx"
   },
   "dependencies": {

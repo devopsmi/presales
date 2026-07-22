@@ -80,7 +80,7 @@ interface PresalesContextValue extends PresalesState {
   setQuotationResult: (header: QuotationHeader, rows: QuotationRow[], trades: TradeRole[]) => void;
   setVendorName: (name: string) => void;
   syncConfig: () => Promise<void>;
-  reset: () => void;
+  reset: () => Promise<void>;
 }
 
 const STORAGE_KEY = "presales-preferences";
@@ -141,7 +141,7 @@ const defaults: PresalesState = {
 export function PresalesProvider({ children }: { children: ReactNode }) {
   const prefs = typeof window !== "undefined" ? loadPreferences() : {};
 
-  const [sessionId] = useState<string>(loadSessionId);
+  const [sessionId, setSessionId] = useState<string>(loadSessionId);
   const [selectedTrades, setSelectedTradesRaw] = useState<TradeRole[]>(
     prefs.selectedTrades ?? defaults.selectedTrades
   );
@@ -190,18 +190,26 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  const reset = useCallback(() => {
-    setSelectedTradesRaw(defaults.selectedTrades);
-    setIndustryRaw(defaults.industry);
-    setBudgetRange(defaults.budgetRange);
-    setModelProviderRaw(defaults.modelProvider);
-    setCustomModels(defaults.customModels);
+  const reset = useCallback(async () => {
+    const oldSessionId = sessionId;
+    const newSessionId = generateSessionId();
+    try {
+      localStorage.setItem(SESSION_ID_KEY, newSessionId);
+    } catch {
+      // Ignore
+    }
+    // Clear backend cache for old session (fire-and-forget)
+    fetch("/api/session/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: oldSessionId }),
+    }).catch(() => {});
+    setSessionId(newSessionId);
     setAttachments(defaults.attachments);
     setQuotation(defaults.quotation);
     setHeader(defaults.header);
     setQuotationTrades(defaults.quotationTrades);
-    setVendorName(defaults.vendorName);
-  }, []);
+  }, [sessionId]);
 
   const setQuotationResult = useCallback(
     (h: QuotationHeader, rows: QuotationRow[], trades: TradeRole[]) => {
