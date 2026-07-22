@@ -5,6 +5,7 @@
  * Does NOT generate the final requirement brief — that's the main agent's job.
  */
 import { createAgent, tool } from "langchain";
+import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { z } from "zod";
 import type { StoredFile } from "@/lib/agent/state";
@@ -94,7 +95,7 @@ export async function runFileParser(
 
   const userPrompt = `请按顺序处理以下文件，每个文件先 read_file 再 write_parsed：\n${files.filter((f) => !f.parsed).map((f) => `- [${f.index}] ${f.name} (${f.type})`).join("\n")}`;
 
-  await agent.invoke({ messages: [{ role: "user", content: userPrompt }] });
+  await agent.invoke({ messages: [new HumanMessage(userPrompt)] });
 
   const parsedCount = Array.from(fileStore.values()).filter((f) => f.parsed).length;
   logger.info("file_parser complete", { parsedCount });

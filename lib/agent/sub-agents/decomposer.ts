@@ -3,10 +3,11 @@
  * into a 5-level QuotationRow[] hierarchy.
  */
 import { createAgent } from "langchain";
+import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { QuotationRow } from "@/lib/types";
 import type { DecomposerOutput } from "@/lib/agent/state";
-import { createModelLoggingMiddleware } from "@/lib/agent/llm";
+import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "decomposer" });
@@ -110,12 +111,10 @@ export async function runDecomposer(
 
   const userPrompt = `请根据以下需求简报，生成功能拆解清单：\n\n${input.structuredBrief}`;
   const result = await agent.invoke({
-    messages: [{ role: "user", content: userPrompt }],
+    messages: [new HumanMessage(userPrompt)],
   });
 
-  const output = typeof result.messages?.at(-1)?.content === "string"
-    ? result.messages.at(-1)!.content as string
-    : "";
+  const output = extractStringContent(result.messages?.at(-1)?.content);
 
   const rows = parseRowsFromOutput(output);
   logger.info("decomposer complete", { rowCount: rows.length });

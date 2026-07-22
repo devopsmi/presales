@@ -5,12 +5,13 @@
 import fs from "fs";
 import path from "path";
 import { createAgent } from "langchain";
+import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { TradeRole } from "@/lib/constants";
 import { VENDOR_NAME } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { EstimatorOutput } from "@/lib/agent/state";
-import { createModelLoggingMiddleware } from "@/lib/agent/llm";
+import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "estimator" });
@@ -119,12 +120,10 @@ export async function runEstimator(
   });
 
   const result = await agent.invoke({
-    messages: [{ role: "user", content: userPrompt }],
+    messages: [new HumanMessage(userPrompt)],
   });
 
-  const output = typeof result.messages?.at(-1)?.content === "string"
-    ? result.messages.at(-1)!.content as string
-    : "";
+  const output = extractStringContent(result.messages?.at(-1)?.content);
 
   const rows = parseEstimatedRows(output);
   const header = buildHeader(input);

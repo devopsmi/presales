@@ -1,27 +1,34 @@
 /**
  * Main Agent — presales orchestration via LangChain createAgent (Subagent pattern).
  *
- * Exposes 4 tools (3 sub-agents + grill-me) to the LLM.
- * Uses stage-tracking middleware to enforce sequential execution.
+ * Exposes 6 tools (3 sub-agents + query_file + write_brief + grill-me) to the LLM.
+ *
+ * Agent + MemorySaver are module-level singletons – created once, reused across
+ * all requests per model. Each tool resolves its session-scoped PipelineCache
+ * and SessionConfig at runtime via config.configurable.thread_id (= sessionId).
  *
  * Tools:
  *   parse_files    → FileParser sub-agent
+ *   query_file     → read parsed file content by index
+ *   write_brief    → save structured requirement brief
  *   decompose      → Decomposer sub-agent
- *   estimate_hours → Estimator sub-agent
+ *   estimate_hours → Estimator sub-agent + quotation computation
  *   grill_me       → loads grill-me skill, runs clarification check
  */
 import fs from "fs";
 import path from "path";
-import { createAgent, tool, createMiddleware } from "langchain";
+import { createAgent, tool } from "langchain";
 import { MemorySaver } from "@langchain/langgraph";
-import { ToolMessage } from "@langchain/core/messages";
+import { HumanMessage } from "@langchain/core/messages";
 import { z } from "zod";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { Attachment } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 import { TRADE_DAILY_RATES } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { PipelineStage, StoredFile } from "@/lib/agent/state";
+import { getSessionConfig } from "@/lib/session-config";
 import { runFileParser } from "@/lib/agent/sub-agents/file-parser";
 import { runDecomposer } from "@/lib/agent/sub-agents/decomposer";
 import { runEstimator } from "@/lib/agent/sub-agents/estimator";
@@ -29,6 +36,26 @@ import log from "@/lib/logger";
 import { createModelLoggingMiddleware } from "@/lib/agent/llm";
 
 const logger = log.child({ agent: "main" });
+
+// ---------------------------------------------------------------------------
+// Module-level singletons — survive across HTTP requests
+// ---------------------------------------------------------------------------
+
+/** Shared MemorySaver — one instance per process, keyed by thread_id (= sessionId) */
+const sharedCheckpointer = new MemorySaver();
+
+/** Compiled agent cache — keyed by model name, avoids re-creating the LangGraph graph */
+const agentCache = new Map<string, ReturnType<typeof createAgent>>();
+
+function getModelKey(model: BaseChatModel): string {
+  // BaseChatModel stores model name in private fields; access via unknown cast
+  const m = model as unknown as Record<string, unknown>;
+  return (m.model as string) || (m.modelName as string) || "default";
+}
+
+function getSessionId(config?: RunnableConfig): string {
+  return (config?.configurable?.thread_id as string) || "default";
+}
 
 // ---------------------------------------------------------------------------
 // Session-level pipeline cache — survives across POST /api/chat requests.
@@ -56,7 +83,9 @@ function ingestAttachments(cache: PipelineCache, attachments: Attachment[]): voi
   let nextIndex = cache.fileStore.size;
   for (const att of attachments) {
     if (!att.rawData) continue;
-    const existing = Array.from(cache.fileStore.values()).find((f) => f.name === att.name && f.body === att.rawData);
+    const existing = Array.from(cache.fileStore.values()).find(
+      (f) => f.name === att.name && f.body === att.rawData,
+    );
     if (existing) continue;
     cache.fileStore.set(nextIndex, {
       index: nextIndex,
@@ -70,15 +99,27 @@ function ingestAttachments(cache: PipelineCache, attachments: Attachment[]): voi
   }
 }
 
-function buildFileListHint(cache: PipelineCache): string {
+/**
+ * Get a human-readable file status summary for the given session.
+ * Returns null if no files have been uploaded.
+ *
+ * Used by the API route to inject file context into the agent's messages,
+ * since tool descriptions are now static (agent is a cached singleton).
+ */
+export function getFileStatusMessage(sessionId: string): string | null {
+  const cache = sessionCaches.get(sessionId);
+  if (!cache) return null;
   const all = Array.from(cache.fileStore.values());
-  if (!all.length) return "";
+  if (!all.length) return null;
+
   const unparsed = all.filter((f) => !f.parsed);
   const parsed = all.filter((f) => f.parsed);
+
   const parts: string[] = [];
   if (unparsed.length) parts.push(`待解析：${unparsed.map((f) => `[${f.index}] ${f.name}`).join(" ")}`);
   if (parsed.length) parts.push(`已解析：${parsed.map((f) => `[${f.index}] ${f.name}`).join(" ")}`);
-  return `当前文件：${parts.join("  ")}。`;
+
+  return `当前文件（共 ${all.length} 个）：${parts.join("  ")}。${unparsed.length ? "请先调用 parse_files 解析待解析文件。" : ""}`;
 }
 
 export function clearSessionCache(sessionId: string): boolean {
@@ -98,7 +139,7 @@ function loadSkillContent(skillName: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline cache — shared across tool calls via closure
+// Pipeline cache — shared across tool calls via session-scoped Map
 // ---------------------------------------------------------------------------
 
 interface PipelineCache {
@@ -174,7 +215,7 @@ function computeQuotationResult(
 const MAIN_SYSTEM_PROMPT = `你是售前方案主管 Agent，负责与客户沟通并调度子Agent完成报价。
 
 ## 决策流程
-1. 检查 query_file 工具描述中是否有待解析文件 → 有则调用 parse_files 解析
+1. 检查消息中是否有文件状态提示，如有待解析文件，调用 parse_files 解析
 2. 收集信息：用户描述 + 已解析文件内容（用 query_file 逐文件查看）
 3. 评估信息是否足够生成完整简报。如不足：
    - 用 grill_me 检视缺失维度
@@ -197,17 +238,15 @@ const MAIN_SYSTEM_PROMPT = `你是售前方案主管 Agent，负责与客户沟�
 - 最终报价以 estimate_hours 的输出为准`;
 
 // ---------------------------------------------------------------------------
-// Tool builders
+// Tool builders — all resolve session via config.configurable.thread_id
 // ---------------------------------------------------------------------------
 
-function buildParseFilesTool(
-  model: BaseChatModel,
-  cache: PipelineCache,
-) {
-  const fileHint = buildFileListHint(cache);
+function buildParseFilesTool(model: BaseChatModel) {
   return tool(
-    async ({ rawText }: { rawText: string }) => {
-      logger.info("parse_files called");
+    async ({ rawText }: { rawText: string }, config?: RunnableConfig) => {
+      const sessionId = getSessionId(config);
+      const cache = getOrCreateSessionCache(sessionId);
+      logger.info("parse_files called", { sessionId });
       await runFileParser(model, cache.fileStore);
 
       cache.stage = "parsed";
@@ -227,7 +266,7 @@ function buildParseFilesTool(
     },
     {
       name: "parse_files",
-      description: `启动文件解析子Agent，逐一解析待解析文件的文本内容。${fileHint}参数 rawText 为用户的完整原始需求描述。`,
+      description: "启动文件解析子Agent，逐一解析待解析文件的文本内容。参数 rawText 为用户的完整原始需求描述。",
       schema: z.object({
         rawText: z.string().describe("用户的完整原始需求描述文本"),
       }),
@@ -235,34 +274,43 @@ function buildParseFilesTool(
   );
 }
 
-function buildQueryFileTool(cache: PipelineCache) {
-  const fileList = Array.from(cache.fileStore.values())
-    .map((f) => `[${f.index}] ${f.name}${f.parsed ? "✓" : ""}`)
-    .join(" ");
+function buildQueryFileTool() {
   return tool(
-    async ({ index }: { index: number }) => {
+    async ({ index }: { index: number }, config?: RunnableConfig) => {
+      const sessionId = getSessionId(config);
+      const cache = getOrCreateSessionCache(sessionId);
       const file = cache.fileStore.get(index);
       if (!file) return JSON.stringify({ error: `文件索引 ${index} 不存在` });
-      if (!file.parsed) return JSON.stringify({ name: file.name, type: file.type, index, parsed: false, hint: "尚未解析，请先调用 parse_files" });
+      if (!file.parsed)
+        return JSON.stringify({
+          name: file.name,
+          type: file.type,
+          index,
+          parsed: false,
+          hint: "尚未解析，请先调用 parse_files",
+        });
       return JSON.stringify({ name: file.name, type: file.type, index, parsed: true, content: file.parsed });
     },
     {
       name: "query_file",
-      description: `查询指定文件索引的已解析内容。可用文件: ${fileList || "无"}。✓表示已解析。参数为文件索引号。`,
+      description: "查询指定文件索引的已解析内容。参数为文件索引号。使用前请确保已调用 parse_files。",
       schema: z.object({ index: z.number().describe("文件索引号") }),
     },
   );
 }
 
-function buildWriteBriefTool(cache: PipelineCache) {
+function buildWriteBriefTool() {
   return tool(
-    async ({ summary }: { summary: string }) => {
+    async ({ summary }: { summary: string }, config?: RunnableConfig) => {
+      const sessionId = getSessionId(config);
+      const cache = getOrCreateSessionCache(sessionId);
+
       const customerName = summary.match(/客户名称[：:]\s*(.+)/)?.[1]?.trim() ?? "未指定客户";
       const projectName = summary.match(/^##\s*(.+)/m)?.[1]?.trim() ?? "未指定项目";
       cache.structuredBrief = summary;
       cache.customerName = customerName;
       cache.projectName = projectName;
-      logger.info("brief written", { customerName, projectName, length: summary.length });
+      logger.info("brief written", { sessionId, customerName, projectName, length: summary.length });
       return JSON.stringify({
         status: "ok",
         customerName,
@@ -281,13 +329,18 @@ function buildWriteBriefTool(cache: PipelineCache) {
   );
 }
 
-function buildDecomposeTool(model: BaseChatModel, cache: PipelineCache) {
+function buildDecomposeTool(model: BaseChatModel) {
   return tool(
-    async () => {
+    async (_input: {}, config?: RunnableConfig) => {
+      const sessionId = getSessionId(config);
+      const cache = getOrCreateSessionCache(sessionId);
+
+      // Inline stage validation
       if (!cache.structuredBrief) {
         return JSON.stringify({ status: "error", message: "请先汇总需求简报（调用 write_brief）" });
       }
-      logger.info("decompose called");
+
+      logger.info("decompose called", { sessionId });
       const result = await runDecomposer(model, { structuredBrief: cache.structuredBrief });
 
       cache.stage = "decomposed";
@@ -307,38 +360,43 @@ function buildDecomposeTool(model: BaseChatModel, cache: PipelineCache) {
   );
 }
 
-function buildEstimateHoursTool(
-  model: BaseChatModel,
-  cache: PipelineCache,
-  selectedTrades: TradeRole[],
-  budgetRange: [number, number],
-  vendorName: string,
-) {
+function buildEstimateHoursTool(model: BaseChatModel) {
   return tool(
-    async () => {
+    async (_input: {}, config?: RunnableConfig) => {
+      const sessionId = getSessionId(config);
+      const cache = getOrCreateSessionCache(sessionId);
+      const sessionConfig = getSessionConfig(sessionId);
+
+      // Inline stage validation
       if (cache.stage !== "decomposed") {
-        return JSON.stringify({ status: "error", message: "请先完成功能拆解" });
+        return JSON.stringify({ status: "error", message: "请先完成功能拆解（调用 decompose）" });
       }
       if (!cache.rows.length) {
         return JSON.stringify({ status: "error", message: "功能清单为空" });
       }
-      logger.info("estimate_hours called", { rowCount: cache.rows.length });
+
+      logger.info("estimate_hours called", { sessionId, rowCount: cache.rows.length });
 
       const result = await runEstimator(model, {
         rows: cache.rows,
-        selectedTrades,
+        selectedTrades: sessionConfig.trades,
         estimationPlanId: "default-plan",
         customerName: cache.customerName,
         projectName: cache.projectName,
-        vendorName,
-        budgetRange,
+        vendorName: sessionConfig.vendorName,
+        budgetRange: sessionConfig.budgetRange,
       });
 
       cache.stage = "estimated";
       cache.rows = result.rows;
       cache.header = result.header;
 
-      const quotation = computeQuotationResult(result.rows, result.header, selectedTrades, budgetRange);
+      const quotation = computeQuotationResult(
+        result.rows,
+        result.header,
+        sessionConfig.trades,
+        sessionConfig.budgetRange,
+      );
       return JSON.stringify(quotation);
     },
     {
@@ -349,13 +407,19 @@ function buildEstimateHoursTool(
   );
 }
 
-function buildGrillMeTool(model: BaseChatModel, cache: PipelineCache) {
+function buildGrillMeTool(model: BaseChatModel) {
   return tool(
-    async () => {
+    async (_input: {}, config?: RunnableConfig) => {
+      const sessionId = getSessionId(config);
+      const cache = getOrCreateSessionCache(sessionId);
+
       if (!cache.structuredBrief) {
-        return JSON.stringify({ isComplete: true, output: "尚未解析需求，请先调用 parse_files。" });
+        return JSON.stringify({
+          isComplete: false,
+          output: "尚未生成需求简报。请先与用户沟通收集足够信息，然后调用 write_brief 保存简报，之后再用 grill_me 检查完整性。",
+        });
       }
-      logger.info("grill_me called");
+      logger.info("grill_me called", { sessionId });
       const skillContent = loadSkillContent("grill-me");
 
       const grillAgent = createAgent({
@@ -364,12 +428,21 @@ function buildGrillMeTool(model: BaseChatModel, cache: PipelineCache) {
       });
 
       const result = await grillAgent.invoke({
-        messages: [{ role: "user", content: `请检查以下需求的完整性：\n\n${cache.structuredBrief}\n\n按grill-me格式输出。` }],
+        messages: [
+          new HumanMessage(`请检查以下需求的完整性：\n\n${cache.structuredBrief}\n\n按grill-me格式输出。`),
+        ],
       });
 
-      const output = typeof result.messages?.at(-1)?.content === "string"
-        ? result.messages.at(-1)!.content as string
-        : "";
+      // Reasoning models (deepseek-v4, etc.) return content as [{type:"reasoning",...},{type:"text",text:"..."}]
+      const rawContent = result.messages?.at(-1)?.content;
+      const output = typeof rawContent === "string"
+        ? rawContent
+        : Array.isArray(rawContent)
+          ? (rawContent as Array<{ type: string; text?: string }>)
+              .filter((b) => b.type === "text")
+              .map((b) => b.text ?? "")
+              .join("")
+          : "";
       const isComplete = output.includes("需求完整") || output.includes("无需澄清");
       return JSON.stringify({ isComplete, output });
     },
@@ -382,77 +455,47 @@ function buildGrillMeTool(model: BaseChatModel, cache: PipelineCache) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage tracking middleware
+// Agent factory — caches compiled agent per model
 // ---------------------------------------------------------------------------
 
-function createStageTracker(cache: PipelineCache) {
-  return createMiddleware({
-    name: "StageTracker",
-    wrapToolCall: async (request: any, handler: any) => {
-      const toolName = request.toolCall?.name;
-      const currentStage = cache.stage;
-
-      const order: Record<string, PipelineStage> = {
-        parse_files: "idle",
-        decompose: "parsed",
-        estimate_hours: "decomposed",
-      };
-
-      const required = order[toolName];
-      if (required) {
-        const stageOrder: PipelineStage[] = ["idle", "parsed", "decomposed", "estimated"];
-        const currentIdx = stageOrder.indexOf(currentStage);
-        const requiredIdx = stageOrder.indexOf(required);
-        if (currentIdx < requiredIdx) {
-          const labels: Record<PipelineStage, string> = {
-            idle: "初始", parsed: "文件解析", decomposed: "功能拆解", estimated: "已完成",
-          };
-          return new ToolMessage({
-            content: `无法执行 "${toolName}"：需要先完成${labels[required]}（当前: ${labels[currentStage]}）`,
-            tool_call_id: request.toolCall?.id ?? "",
-          });
-        }
-      }
-
-      return handler(request);
-    },
+function buildAgent(model: BaseChatModel) {
+  return createAgent({
+    model,
+    tools: [
+      buildParseFilesTool(model),
+      buildQueryFileTool(),
+      buildWriteBriefTool(),
+      buildGrillMeTool(model),
+      buildDecomposeTool(model),
+      buildEstimateHoursTool(model),
+    ],
+    systemPrompt: MAIN_SYSTEM_PROMPT,
+    middleware: [createModelLoggingMiddleware("main")],
+    checkpointer: sharedCheckpointer,
   });
 }
 
 // ---------------------------------------------------------------------------
-// Factory
+// Public API — lightweight entry point (no heavy construction)
 // ---------------------------------------------------------------------------
 
 export interface CreateMainAgentInput {
   model: BaseChatModel;
-  selectedTrades: TradeRole[];
-  budgetRange: [number, number];
-  vendorName: string;
   attachments: Attachment[];
   sessionId?: string;
 }
 
 export function createPresalesAgent(input: CreateMainAgentInput) {
-  const cache = getOrCreateSessionCache(input.sessionId || "default");
+  const sessionId = input.sessionId || "default";
+  const cache = getOrCreateSessionCache(sessionId);
   ingestAttachments(cache, input.attachments);
 
-  const parseFilesTool = buildParseFilesTool(input.model, cache);
-  const queryFileTool = buildQueryFileTool(cache);
-  const decomposeTool = buildDecomposeTool(input.model, cache);
-  const estimateHoursTool = buildEstimateHoursTool(
-    input.model, cache, input.selectedTrades, input.budgetRange, input.vendorName,
-  );
-  const grillMeTool = buildGrillMeTool(input.model, cache);
+  const modelKey = getModelKey(input.model);
 
-  const stageTracker = createStageTracker(cache);
+  if (!agentCache.has(modelKey)) {
+    agentCache.set(modelKey, buildAgent(input.model));
+    logger.info("agent created and cached", { modelKey });
+  }
 
-  const agent = createAgent({
-    model: input.model,
-    tools: [parseFilesTool, queryFileTool, buildWriteBriefTool(cache), grillMeTool, decomposeTool, estimateHoursTool],
-    systemPrompt: MAIN_SYSTEM_PROMPT,
-    middleware: [stageTracker, createModelLoggingMiddleware("main")],
-    checkpointer: new MemorySaver(),
-  });
-
-  return agent;
+  return agentCache.get(modelKey)!;
 }

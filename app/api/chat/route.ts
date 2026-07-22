@@ -1,7 +1,8 @@
 import type { UIMessage } from "ai";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { Attachment, SseMessage } from "@/lib/types";
 import { createModelInstance } from "@/lib/agent/llm";
-import { createPresalesAgent } from "@/lib/agent/main-agent";
+import { createPresalesAgent, getFileStatusMessage } from "@/lib/agent/main-agent";
 import { getSessionConfig } from "@/lib/session-config";
 import log from "@/lib/logger";
 
@@ -69,9 +70,6 @@ export async function POST(req: Request) {
 
     const agent = createPresalesAgent({
       model,
-      selectedTrades: config.trades,
-      budgetRange: config.budgetRange,
-      vendorName: config.vendorName,
       attachments,
       sessionId: sessionId || "default",
     });
@@ -86,9 +84,17 @@ export async function POST(req: Request) {
           const msgId = `msg-${Date.now()}`;
           send({ type: "text-start", id: msgId });
 
+          const sid = sessionId || "default";
+          const fileStatus = getFileStatusMessage(sid);
+          const agentMessages = [];
+          if (fileStatus) {
+            agentMessages.push(new SystemMessage(fileStatus));
+          }
+          agentMessages.push(new HumanMessage({ content: rawText, id: msgId }));
+
           const run = await agent.streamEvents(
-            { messages: [{ role: "user", content: rawText }] },
-            { version: "v3", configurable: { thread_id: sessionId || "default" } },
+            { messages: agentMessages },
+            { version: "v3", configurable: { thread_id: sid } },
           );
 
           await Promise.all([

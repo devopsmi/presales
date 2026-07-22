@@ -21,7 +21,7 @@ const PREVIEW_LEN = 400;
 
 type ContentBlock = { type: string; text?: string; reasoning?: string; [k: string]: unknown };
 
-function extractStringContent(content: unknown): string {
+export function extractStringContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return (content as ContentBlock[])
