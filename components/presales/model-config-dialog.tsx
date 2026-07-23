@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import type { ModelConfig } from "@/lib/session-config";
+import { DEFAULT_MAX_TOKENS } from "@/lib/session-config";
 import { usePresales } from "@/lib/presales-context";
 
 function generateId(): string {
@@ -30,7 +31,7 @@ export function ModelConfigDialog({ open, onOpenChange }: ModelConfigDialogProps
   function handleAdd() {
     setDraft((prev) => [
       ...prev,
-      { id: generateId(), name: "", model: "", baseUrl: "", apiKey: "", protocol: "openai" },
+      { id: generateId(), name: "", model: "", baseUrl: "", apiKey: "", protocol: "openai", maxTokens: DEFAULT_MAX_TOKENS },
     ]);
   }
 
@@ -106,6 +107,20 @@ export function ModelConfigDialog({ open, onOpenChange }: ModelConfigDialogProps
                 <option value="openai">OpenAI 兼容</option>
                 <option value="anthropic">Anthropic</option>
               </select>
+              <Input
+                type="number"
+                placeholder={`Max Tokens (默认 ${DEFAULT_MAX_TOKENS})`}
+                value={m.maxTokens ?? ""}
+                onChange={(e) =>
+                  setDraft((prev) =>
+                    prev.map((item) =>
+                      item.id === m.id
+                        ? { ...item, maxTokens: e.target.value ? Number(e.target.value) : DEFAULT_MAX_TOKENS }
+                        : item,
+                    ),
+                  )
+                }
+              />
             </div>
           ))}
           <Button

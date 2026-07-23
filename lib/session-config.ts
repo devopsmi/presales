@@ -1,6 +1,8 @@
 import type { TradeRole } from "@/lib/constants";
 import { DEFAULT_MODEL, VENDOR_NAME } from "@/lib/constants";
 
+export const DEFAULT_MAX_TOKENS = 32768;
+
 export interface ModelConfig {
   id: string;
   name: string;
@@ -9,6 +11,10 @@ export interface ModelConfig {
   apiKey: string;
   /** Protocol to use for this model's API calls */
   protocol: "openai" | "anthropic";
+  /** Max output tokens (reasoning + content share this budget).
+   *  Default 32768 — deepseek-v4-pro defaults to 4096 which is insufficient
+   *  for thinking mode, causing empty content with reasoning-only output. */
+  maxTokens?: number;
 }
 
 export interface SessionConfig {
@@ -17,6 +23,7 @@ export interface SessionConfig {
   model: string;
   models: ModelConfig[];
   vendorName: string;
+  estimationPlanId: string;
 }
 
 const DEFAULT_CONFIG: SessionConfig = {
@@ -25,6 +32,7 @@ const DEFAULT_CONFIG: SessionConfig = {
   model: DEFAULT_MODEL,
   models: [],
   vendorName: VENDOR_NAME,
+  estimationPlanId: "expert-judgment-plan",
 };
 
 const store = new Map<string, SessionConfig>();
@@ -44,6 +52,7 @@ export function updateSessionConfig(
     model: patch.model ?? current.model,
     models: patch.models ?? current.models,
     vendorName: patch.vendorName ?? current.vendorName,
+    estimationPlanId: patch.estimationPlanId ?? current.estimationPlanId,
   };
   store.set(sessionId, updated);
   return updated;

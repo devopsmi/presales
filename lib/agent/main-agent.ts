@@ -7,13 +7,16 @@
  * all requests per model. Each tool resolves its session-scoped PipelineCache
  * and SessionConfig at runtime via config.configurable.thread_id (= sessionId).
  *
+ * Dispatch chain:
+ *   parse_files → query_file → grill_me (clarify) → write_brief → decompose → estimate_hours
+ *
  * Tools:
  *   parse_files    → FileParser sub-agent
  *   query_file     → read parsed file content by index
  *   write_brief    → save structured requirement brief
  *   decompose      → Decomposer sub-agent
  *   estimate_hours → Estimator sub-agent + quotation computation
- *   grill_me       → loads grill-me skill, runs clarification check
+ *   grill_me       → loads grill-me skill, runs clarification check (before or after brief)
  */
 import fs from "fs";
 import path from "path";
@@ -229,7 +232,7 @@ const MAIN_SYSTEM_PROMPT = `你是售前方案主管 Agent，负责与客户沟�
 - **parse_files**: 启动文件解析子Agent，逐文件读取文本并保存摘要。有未解析文件时调用。
 - **query_file**: 查看指定文件索引的已解析内容，阅读文件需求细节。
 - **write_brief**: 保存结构化需求简报（Markdown）。格式需包含：项目标题、客户信息（名称+行业）、项目概述、核心模块列表、技术要求、交付要求。在信息收集充分后调用。
-- **grill_me**: 从7个维度检查需求完整性（范围、用户角色、功能、技术约束、第三方集成、数据规模、交付时间）。既可用于 write_brief 后的最终检查，也可用于信息收集阶段辅助提问。
+- **grill_me**: 从7个维度检查需求完整性（范围、用户角色、功能、技术约束、第三方集成、数据规模、交付时间）。信息收集阶段调用时，需将已收集的需求信息传入 context 参数；write_brief 后调用时无需参数。
 - **decompose**: 将需求简报拆解为五级功能清单。必须在 write_brief 后调用。
 - **estimate_hours**: 估算工时并生成报价。必须在 decompose 后调用。
 
@@ -380,7 +383,7 @@ function buildEstimateHoursTool(model: BaseChatModel) {
       const result = await runEstimator(model, {
         rows: cache.rows,
         selectedTrades: sessionConfig.trades,
-        estimationPlanId: "default-plan",
+        estimationPlanId: sessionConfig.estimationPlanId,
         customerName: cache.customerName,
         projectName: cache.projectName,
         vendorName: sessionConfig.vendorName,
@@ -409,17 +412,19 @@ function buildEstimateHoursTool(model: BaseChatModel) {
 
 function buildGrillMeTool(model: BaseChatModel) {
   return tool(
-    async (_input: {}, config?: RunnableConfig) => {
+    async ({ context }: { context?: string }, config?: RunnableConfig) => {
       const sessionId = getSessionId(config);
       const cache = getOrCreateSessionCache(sessionId);
 
-      if (!cache.structuredBrief) {
+      const contentToCheck = context?.trim() || cache.structuredBrief;
+      if (!contentToCheck) {
         return JSON.stringify({
           isComplete: false,
-          output: "尚未生成需求简报。请先与用户沟通收集足够信息，然后调用 write_brief 保存简报，之后再用 grill_me 检查完整性。",
+          output: "尚未收集到任何需求信息。请先与用户沟通、解析文件，然后将已收集的需求信息作为 context 参数传入 grill_me。",
         });
       }
-      logger.info("grill_me called", { sessionId });
+
+      logger.info("grill_me called", { sessionId, hasBrief: !!cache.structuredBrief, hasContext: !!context });
       const skillContent = loadSkillContent("grill-me");
 
       const grillAgent = createAgent({
@@ -429,7 +434,7 @@ function buildGrillMeTool(model: BaseChatModel) {
 
       const result = await grillAgent.invoke({
         messages: [
-          new HumanMessage(`请检查以下需求的完整性：\n\n${cache.structuredBrief}\n\n按grill-me格式输出。`),
+          new HumanMessage(`请检查以下需求的完整性：\n\n${contentToCheck}\n\n按grill-me格式输出。`),
         ],
       });
 
@@ -439,17 +444,19 @@ function buildGrillMeTool(model: BaseChatModel) {
         ? rawContent
         : Array.isArray(rawContent)
           ? (rawContent as Array<{ type: string; text?: string }>)
-              .filter((b) => b.type === "text")
-              .map((b) => b.text ?? "")
-              .join("")
+            .filter((b) => b.type === "text")
+            .map((b) => b.text ?? "")
+            .join("")
           : "";
       const isComplete = output.includes("需求完整") || output.includes("无需澄清");
       return JSON.stringify({ isComplete, output });
     },
     {
       name: "grill_me",
-      description: "检查需求完整性，识别模糊点。在 parse_files 后可选调用。无需参数。",
-      schema: z.object({}),
+      description: "从7个维度检查需求完整性（范围、用户角色、功能、技术约束、第三方集成、数据规模、交付时间）。既可用于信息收集阶段辅助提问（传入 context 参数），也可用于 write_brief 后最终检查（无需参数）。",
+      schema: z.object({
+        context: z.string().optional().describe("当前已收集的需求信息文本。用于 write_brief 前进行需求澄清时传入；write_brief 后调用时无需传入。"),
+      }),
     },
   );
 }

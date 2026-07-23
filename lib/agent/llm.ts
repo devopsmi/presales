@@ -9,25 +9,37 @@ import { ChatAnthropic } from "@langchain/anthropic";
 import { createMiddleware } from "langchain";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { ModelConfig } from "@/lib/session-config";
+import { DEFAULT_MAX_TOKENS } from "@/lib/session-config";
 import log from "@/lib/logger";
 
 const llmLog = log.child({ module: "llm" });
 
-const PREVIEW_LEN = 400;
+const PREVIEW_LEN = 100000;
 
 // ---------------------------------------------------------------------------
 // Content extraction helpers
 // ---------------------------------------------------------------------------
 
-type ContentBlock = { type: string; text?: string; reasoning?: string; [k: string]: unknown };
+type ContentBlock = { type: string; text?: string; reasoning?: string;[k: string]: unknown };
 
 export function extractStringContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return (content as ContentBlock[])
+    const blocks = content as ContentBlock[];
+    // Primary: extract text blocks
+    const text = blocks
       .filter((b) => b.type === "text" && b.text)
       .map((b) => b.text!)
       .join("");
+    if (text) return text;
+    // Fallback: when models like deepseek-v4-pro return only reasoning blocks
+    // (no text blocks), extract from reasoning content instead.
+    const reasoning = blocks
+      .filter((b) => b.type === "reasoning" && b.reasoning)
+      .map((b) => b.reasoning!)
+      .join("\n");
+    if (reasoning) return reasoning;
+    return "";
   }
   if (content && typeof content === "object") {
     const c = content as Record<string, unknown>;
@@ -166,13 +178,19 @@ export function createModelInstance(
       ? process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514"
       : process.env.OPENAI_MODEL || "gpt-4o-mini");
 
+  // Only override maxTokens when a custom model is configured.
+  // For standard env-based providers, let the API use its own defaults.
+  const maxTokens: number | undefined = cfg
+    ? (cfg.maxTokens ?? DEFAULT_MAX_TOKENS)
+    : undefined;
+
   // Custom endpoint with Anthropic protocol → ChatAnthropic
   if (cfg?.baseUrl && (cfg.protocol === "anthropic" || defaultProvider === "anthropic")) {
     return new ChatAnthropic({
       model: modelName,
-      maxTokens: 4096,
       apiKey: cfg.apiKey || process.env.ANTHROPIC_API_KEY,
       clientOptions: { baseURL: cfg.baseUrl },
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
     });
   }
 
@@ -180,11 +198,11 @@ export function createModelInstance(
   if (cfg?.baseUrl) {
     return new ChatOpenAI({
       model: modelName,
-      maxTokens: 4096,
       configuration: {
         baseURL: cfg.baseUrl,
         apiKey: cfg.apiKey || process.env.OPENAI_API_KEY,
       },
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
     });
   }
 
@@ -192,14 +210,14 @@ export function createModelInstance(
   if (cfg?.protocol === "anthropic" || defaultProvider === "anthropic") {
     return new ChatAnthropic({
       model: modelName,
-      maxTokens: 4096,
       ...(cfg?.apiKey ? { apiKey: cfg.apiKey } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
     });
   }
 
   return new ChatOpenAI({
     model: modelName,
-    maxTokens: 4096,
     ...(cfg?.apiKey ? { configuration: { apiKey: cfg.apiKey } } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
   });
 }

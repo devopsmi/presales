@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test:xlsx": "tsx lib/__tests__/xlsx-generator.test.ts",
     "test:agent": "tsx lib/agent/__tests__/pipeline.test.ts",
-    "test": "pnpm test:xlsx"
+    "test:decomposer": "pnpm tsx lib/agent/sub-agents/__tests__/decomposer.test.ts",
+    "test": "pnpm test:xlsx && pnpm test:decomposer"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.34",

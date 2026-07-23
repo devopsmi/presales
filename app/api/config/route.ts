@@ -12,6 +12,7 @@ interface ConfigRequest {
   model?: string;
   models?: ModelConfig[];
   vendorName?: string;
+  estimationPlanId?: string;
 }
 
 export async function POST(req: Request) {
@@ -31,6 +32,7 @@ export async function POST(req: Request) {
       model: body.model,
       models: body.models,
       vendorName: body.vendorName,
+      estimationPlanId: body.estimationPlanId,
     });
 
     log.info("Session config updated", {

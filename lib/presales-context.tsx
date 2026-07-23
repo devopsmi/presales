@@ -31,7 +31,7 @@ function loadSessionId(): string {
 
 async function syncConfigToBackend(
   sessionId: string,
-  config: { trades: TradeRole[]; budgetRange: [number, number]; model: string; models: ModelConfig[]; vendorName: string },
+  config: { trades: TradeRole[]; budgetRange: [number, number]; model: string; models: ModelConfig[]; vendorName: string; estimationPlanId: string },
 ): Promise<void> {
   try {
     await fetch("/api/config", {
@@ -44,6 +44,7 @@ async function syncConfigToBackend(
         model: config.model,
         models: config.models,
         vendorName: config.vendorName,
+        estimationPlanId: config.estimationPlanId,
       }),
     });
   } catch {
@@ -63,6 +64,7 @@ interface PresalesState {
   sessionId: string;
   quotationTrades: TradeRole[] | null;
   vendorName: string;
+  estimationPlanId: string;
 }
 
 interface PresalesContextValue extends PresalesState {
@@ -79,6 +81,7 @@ interface PresalesContextValue extends PresalesState {
   setQuotationTrades: (trades: TradeRole[] | null) => void;
   setQuotationResult: (header: QuotationHeader, rows: QuotationRow[], trades: TradeRole[]) => void;
   setVendorName: (name: string) => void;
+  setEstimationPlanId: (planId: string) => void;
   syncConfig: () => Promise<void>;
   reset: () => Promise<void>;
 }
@@ -100,6 +103,7 @@ function loadPreferences(): Partial<PresalesState> {
         modelProvider: parsed.modelProvider ?? undefined,
         customModels: parsed.customModels ?? undefined,
         vendorName: parsed.vendorName ?? undefined,
+        estimationPlanId: parsed.estimationPlanId ?? undefined,
       };
     }
   } catch {
@@ -118,6 +122,7 @@ function savePreferences(state: PresalesState): void {
       modelProvider: state.modelProvider,
       customModels: state.customModels,
       vendorName: state.vendorName,
+      estimationPlanId: state.estimationPlanId,
     }));
   } catch {
     // Ignore quota errors
@@ -136,6 +141,7 @@ const defaults: PresalesState = {
   sessionId: "",
   quotationTrades: null,
   vendorName: VENDOR_NAME,
+  estimationPlanId: "expert-judgment-plan",
 };
 
 export function PresalesProvider({ children }: { children: ReactNode }) {
@@ -163,6 +169,9 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
   const [quotationTrades, setQuotationTrades] = useState<TradeRole[] | null>(defaults.quotationTrades);
   const [vendorName, setVendorName] = useState<string>(
     prefs.vendorName ?? defaults.vendorName
+  );
+  const [estimationPlanId, setEstimationPlanId] = useState<string>(
+    prefs.estimationPlanId ?? defaults.estimationPlanId
   );
 
   // Avoid syncing on initial mount — only sync on subsequent changes
@@ -203,7 +212,7 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId: oldSessionId }),
-    }).catch(() => {});
+    }).catch(() => { });
     setSessionId(newSessionId);
     setAttachments(defaults.attachments);
     setQuotation(defaults.quotation);
@@ -227,8 +236,9 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
       model: modelProvider,
       models: customModels,
       vendorName,
+      estimationPlanId,
     });
-  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName]);
+  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId]);
 
   // Sync config to backend on changes (skip initial mount)
   useEffect(() => {
@@ -242,25 +252,27 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
       model: modelProvider,
       models: customModels,
       vendorName,
+      estimationPlanId,
     });
-  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName]);
+  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId]);
 
   // Persist preferences on change
   const currentState: PresalesState = {
     selectedTrades, industry, budgetRange, modelProvider, customModels,
     attachments, quotation, header, sessionId, quotationTrades, vendorName,
+    estimationPlanId,
   };
 
   useEffect(() => {
     savePreferences(currentState);
-  }, [selectedTrades, industry, budgetRange, modelProvider, customModels]);
+  }, [selectedTrades, industry, budgetRange, modelProvider, customModels, estimationPlanId]);
 
   const value: PresalesContextValue = {
     selectedTrades, industry, budgetRange, modelProvider, customModels, attachments,
-    quotation, header, sessionId, quotationTrades, vendorName,
+    quotation, header, sessionId, quotationTrades, vendorName, estimationPlanId,
     setSelectedTrades, setIndustry, setBudgetRange, setModelProvider, setCustomModels,
     setAttachments, addAttachments, removeAttachment,
-    setQuotation, setHeader, setQuotationTrades, setQuotationResult, setVendorName, syncConfig, reset,
+    setQuotation, setHeader, setQuotationTrades, setQuotationResult, setVendorName, setEstimationPlanId, syncConfig, reset,
   };
 
   return (

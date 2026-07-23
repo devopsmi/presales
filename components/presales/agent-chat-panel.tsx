@@ -11,6 +11,7 @@ import { TradeSelector } from "./trade-selector";
 import { BudgetInput } from "./budget-input";
 import { ModelPicker } from "./model-picker";
 import { VendorNameInput } from "./vendor-name-input";
+import { EstimationPlanPicker } from "./estimation-plan-picker";
 import { usePresales } from "@/lib/presales-context";
 import { serializeFiles } from "@/lib/file-utils";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
@@ -175,6 +176,7 @@ export function AgentChatPanel() {
             <BudgetInput />
             <VendorNameInput />
             <ModelPicker />
+            <EstimationPlanPicker />
           </div>
         }
       />

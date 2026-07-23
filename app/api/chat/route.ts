@@ -81,32 +81,57 @@ export async function POST(req: Request) {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(msg)}\n\n`));
 
         try {
-          const msgId = `msg-${Date.now()}`;
-          send({ type: "text-start", id: msgId });
-
           const sid = sessionId || "default";
           const fileStatus = getFileStatusMessage(sid);
           const agentMessages = [];
           if (fileStatus) {
             agentMessages.push(new SystemMessage(fileStatus));
           }
-          agentMessages.push(new HumanMessage({ content: rawText, id: msgId }));
+          agentMessages.push(new HumanMessage({ content: rawText, id: `msg-${Date.now()}` }));
 
           const run = await agent.streamEvents(
             { messages: agentMessages },
             { version: "v3", configurable: { thread_id: sid } },
           );
 
+          // Synchronization flag: set to true when a tool event is sent, so the
+          // text loop can split its text part before streaming more text. This
+          // ensures tool cards appear interleaved with text at their invocation
+          // position rather than all at the end.
+          let toolEventInterrupted = false;
+          let textCounter = 0;
+
           await Promise.all([
             (async () => {
               for await (const message of run.messages) {
+                let textStarted = false;
+                let currentTextId = `${Date.now()}-${textCounter++}`;
                 for await (const token of message.text) {
-                  send({ type: "text-delta", id: msgId, delta: token });
+                  // If a tool event was sent since the last text token,
+                  // close the current text part and start a new one so
+                  // the tool card sits between them.
+                  if (toolEventInterrupted) {
+                    if (textStarted) {
+                      send({ type: "text-end", id: currentTextId });
+                    }
+                    currentTextId = `${Date.now()}-${textCounter++}`;
+                    textStarted = false;
+                    toolEventInterrupted = false;
+                  }
+                  if (!textStarted) {
+                    send({ type: "text-start", id: currentTextId });
+                    textStarted = true;
+                  }
+                  send({ type: "text-delta", id: currentTextId, delta: token });
+                }
+                if (textStarted) {
+                  send({ type: "text-end", id: currentTextId });
                 }
               }
             })(),
             (async () => {
               for await (const call of run.toolCalls) {
+                toolEventInterrupted = true;
                 const toolCallId = call.callId || `tc-${call.name}-${Date.now()}`;
                 send({ type: "tool-input-start", toolCallId, toolName: mapToolName(call.name) });
                 send({
@@ -128,14 +153,12 @@ export async function POST(req: Request) {
             })(),
           ]);
 
-          send({ type: "text-end", id: msgId });
           send({ type: "finish", finishReason: "stop" });
           controller.close();
         } catch (err) {
           log.error("agent failed", {
             error: err instanceof Error ? err : new Error(String(err)),
           });
-          send({ type: "text-end", id: `msg-${Date.now()}` });
           send({
             type: "error",
             error: err instanceof Error ? err.message : "Agent error",

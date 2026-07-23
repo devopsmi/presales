@@ -20,47 +20,65 @@ const PLANS_DIR = path.resolve(process.cwd(), "lib", "agent", "skills", "plans")
 
 function loadPlan(planId: string): string {
   const planPath = path.join(PLANS_DIR, `${planId}.md`);
-  const defaultPath = path.join(PLANS_DIR, "default-plan.md");
-  if (fs.existsSync(planPath)) return fs.readFileSync(planPath, "utf-8");
-  logger.warn("plan not found, using default", { planId });
-  return fs.readFileSync(defaultPath, "utf-8");
+  return fs.readFileSync(planPath, "utf-8");
 }
 
-function buildSystemPrompt(planContent: string): string {
+function buildSystemPrompt(planContent: string, selectedTrades: TradeRole[]): string {
+  const tradeNames = selectedTrades.join("、");
   return `你是一位资深的软件项目工时估算专家。请严格按照以下估算方案，为每个功能项估算各工种所需人天。
 
 ## 估算方案
 ${planContent}
 
-## 输出格式
-只输出纯 JSON 数组（与输入格式相同，但 trades 字段需要填充），不要包含其他文字。`;
+## 工种
+本次选中的工种：${tradeNames}。
+未列出的工种不要估算。
+
+## 输出格式（紧凑映射）
+纯 JSON 对象，key 为功能项 seq 号（字符串），value 为各工种人天（数字或 null）：
+
+{"1": {"frontend": 3, "backend": 0.5}, "2": {"frontend": 1, "backend": null}}
+
+只输出选中的工种，不参与的填 null。只输出 JSON 对象，不要其他内容。`;
 }
 
-function parseEstimatedRows(output: string): QuotationRow[] {
-  const match = output.match(/\[[\s\S]*\]/);
-  if (!match) throw new Error("Estimator: no JSON array found in output");
-
-  let parsed: unknown;
-  try { parsed = JSON.parse(match[0]); } catch {
-    throw new Error("Estimator: failed to parse JSON");
+function parseEstimatedRows(
+  raw: unknown,
+  originalRows: QuotationRow[],
+): QuotationRow[] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      "Estimator: expected JSON object, got " + (raw === null ? "null" : typeof raw),
+    );
   }
-  if (!Array.isArray(parsed)) throw new Error("Estimator: expected JSON array");
 
-  return (parsed as Array<Record<string, unknown>>).map(
-    (item, idx): QuotationRow => ({
-      seq: typeof item.seq === "number" ? item.seq : idx + 1,
-      module: typeof item.module === "string" ? item.module : "",
-      sub_module: typeof item.sub_module === "string" ? item.sub_module : "",
-      function: typeof item.function === "string" ? item.function : "",
-      sub_function: typeof item.sub_function === "string" ? item.sub_function : "",
-      description: typeof item.description === "string" ? item.description : "",
-      category: item.category === "design" || item.category === "feature" ? item.category : "feature",
-      trades: typeof item.trades === "object" && item.trades !== null
-        ? (item.trades as QuotationRow["trades"])
-        : {},
-      remark: typeof item.remark === "string" ? item.remark : "",
-    }),
-  );
+  const obj = raw as Record<string, Record<string, unknown>>;
+  const seqMap = new Map(originalRows.map((r) => [String(r.seq), r]));
+
+  const touched = new Set<string>();
+
+  for (const [seqStr, trades] of Object.entries(obj)) {
+    const row = seqMap.get(seqStr);
+    if (!row) {
+      throw new Error(`Estimator: unknown seq "${seqStr}" — not in input rows`);
+    }
+
+    if (!trades || typeof trades !== "object" || Array.isArray(trades)) {
+      throw new Error(`Estimator: trades for seq ${seqStr} is not an object`);
+    }
+
+    row.trades = trades as QuotationRow["trades"];
+    touched.add(seqStr);
+  }
+
+  const missing = originalRows.filter((r) => !touched.has(String(r.seq)));
+  if (missing.length > 0) {
+    throw new Error(
+      `Estimator: missing trades for seq: ${missing.map((r) => r.seq).join(", ")}`,
+    );
+  }
+
+  return originalRows;
 }
 
 function buildHeader(input: { customerName: string; projectName: string; vendorName?: string }): QuotationHeader {
@@ -78,15 +96,20 @@ function buildUserPrompt(input: {
   customerName: string;
   projectName: string;
 }): string {
+  const tradeNames = input.selectedTrades.join("、");
+  const items = input.rows
+    .map((r) => `${r.seq}: ${r.description}`)
+    .join("\n");
+
   return [
-    `客户选择的工种：${input.selectedTrades.join("、")}`,
+    `客户选择的工种：${tradeNames}`,
     `客户名称：${input.customerName || "未指定"}`,
     `项目名称：${input.projectName || "未指定"}`,
     "",
-    "以下是功能清单（trades 字段为空，请按估算方案填充）：",
-    JSON.stringify(input.rows, null, 2),
+    `功能清单（共 ${input.rows.length} 项，每行为 seq: 功能描述）：`,
+    items,
     "",
-    "请为每个功能项填充各工种的估算人天（只输出 JSON）。",
+    `请为每项输出 {"seq号": {"工种": 人天}} 的紧凑 JSON 对象。`,
   ].join("\n");
 }
 
@@ -95,7 +118,7 @@ export async function runEstimator(
   input: {
     rows: QuotationRow[];
     selectedTrades: TradeRole[];
-    estimationPlanId?: string;
+    estimationPlanId: string;
     customerName: string;
     projectName: string;
     vendorName?: string;
@@ -109,8 +132,8 @@ export async function runEstimator(
     return { rows: [], header, quotationJson: JSON.stringify({ header, rows: [], summary: {} }) };
   }
 
-  const planContent = loadPlan(input.estimationPlanId || "default-plan");
-  const systemPrompt = buildSystemPrompt(planContent);
+  const planContent = loadPlan(input.estimationPlanId);
+  const systemPrompt = buildSystemPrompt(planContent, input.selectedTrades);
   const userPrompt = buildUserPrompt(input);
 
   const agent = createAgent({
@@ -123,9 +146,34 @@ export async function runEstimator(
     messages: [new HumanMessage(userPrompt)],
   });
 
-  const output = extractStringContent(result.messages?.at(-1)?.content);
+  const rawContent = result.messages?.at(-1)?.content;
+  const output = extractStringContent(rawContent);
 
-  const rows = parseEstimatedRows(output);
+  if (!output) {
+    const blocks = Array.isArray(rawContent)
+      ? (rawContent as Array<{ type: string }>).map((b) => b.type).join(", ")
+      : typeof rawContent;
+    logger.error("estimator empty output", {
+      blockTypes: blocks,
+      rawLen: JSON.stringify(rawContent).length,
+    });
+  }
+
+  // Parse compact object → stitch trades into original rows
+  const match = output.match(/\{[\s\S]*\}/);
+  if (!match) {
+    const preview = (output || "").slice(0, 500);
+    throw new Error(
+      `Estimator: no JSON object found in output (len=${(output || "").length}, preview: ${preview})`,
+    );
+  }
+
+  let parsed: unknown;
+  try { parsed = JSON.parse(match[0]); } catch {
+    throw new Error("Estimator: failed to parse JSON object");
+  }
+
+  const rows = parseEstimatedRows(parsed, input.rows);
   const header = buildHeader(input);
 
   logger.info("estimator complete", { rowCount: rows.length });
