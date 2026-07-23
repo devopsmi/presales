@@ -1,6 +1,7 @@
 import { updateSessionConfig } from "@/lib/session-config";
 import type { ModelConfig } from "@/lib/session-config";
 import type { TradeRole } from "@/lib/constants";
+import type { QuotedRates } from "@/lib/types";
 import log from "@/lib/logger";
 
 export const runtime = "nodejs";
@@ -13,6 +14,7 @@ interface ConfigRequest {
   models?: ModelConfig[];
   vendorName?: string;
   estimationPlanId?: string;
+  quotedRates?: QuotedRates;
 }
 
 export async function POST(req: Request) {
@@ -33,6 +35,7 @@ export async function POST(req: Request) {
       models: body.models,
       vendorName: body.vendorName,
       estimationPlanId: body.estimationPlanId,
+      quotedRates: body.quotedRates,
     });
 
     log.info("Session config updated", {

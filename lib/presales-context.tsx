@@ -2,8 +2,8 @@
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import type { TradeRole, Industry } from "@/lib/constants";
-import { DEFAULT_MODEL, DEFAULT_INDUSTRY, INDUSTRY_DEFAULTS, VENDOR_NAME } from "@/lib/constants";
-import type { QuotationRow, QuotationHeader } from "@/lib/types";
+import { DEFAULT_MODEL, DEFAULT_INDUSTRY, INDUSTRY_DEFAULTS, VENDOR_NAME, TRADE_DAILY_RATES } from "@/lib/constants";
+import type { QuotationRow, QuotationHeader, QuotedRates, FileTab } from "@/lib/types";
 import type { ModelConfig } from "@/lib/session-config";
 
 function generateSessionId(): string {
@@ -31,7 +31,7 @@ function loadSessionId(): string {
 
 async function syncConfigToBackend(
   sessionId: string,
-  config: { trades: TradeRole[]; budgetRange: [number, number]; model: string; models: ModelConfig[]; vendorName: string; estimationPlanId: string },
+  config: { trades: TradeRole[]; budgetRange: [number, number]; model: string; models: ModelConfig[]; vendorName: string; estimationPlanId: string; quotedRates: QuotedRates },
 ): Promise<void> {
   try {
     await fetch("/api/config", {
@@ -45,6 +45,7 @@ async function syncConfigToBackend(
         models: config.models,
         vendorName: config.vendorName,
         estimationPlanId: config.estimationPlanId,
+        quotedRates: config.quotedRates,
       }),
     });
   } catch {
@@ -59,12 +60,16 @@ interface PresalesState {
   modelProvider: string;
   customModels: ModelConfig[];
   attachments: File[];
+  uploadError: string | null;
   quotation: QuotationRow[] | null;
   header: QuotationHeader | null;
   sessionId: string;
   quotationTrades: TradeRole[] | null;
   vendorName: string;
   estimationPlanId: string;
+  quotedRates: QuotedRates;
+  fileTabs: FileTab[];
+  activeRightTab: string;
 }
 
 interface PresalesContextValue extends PresalesState {
@@ -76,14 +81,20 @@ interface PresalesContextValue extends PresalesState {
   setAttachments: (files: File[]) => void;
   addAttachments: (files: File[]) => void;
   removeAttachment: (index: number) => void;
+  uploadError: string | null;
+  setUploadError: (error: string | null) => void;
   setQuotation: (rows: QuotationRow[] | null) => void;
   setHeader: (header: QuotationHeader | null) => void;
   setQuotationTrades: (trades: TradeRole[] | null) => void;
   setQuotationResult: (header: QuotationHeader, rows: QuotationRow[], trades: TradeRole[]) => void;
   setVendorName: (name: string) => void;
   setEstimationPlanId: (planId: string) => void;
+  setQuotedRates: (rates: QuotedRates) => void;
   syncConfig: () => Promise<void>;
   reset: () => Promise<void>;
+  setActiveRightTab: (tabId: string) => void;
+  closeFileTab: (tabId: string) => void;
+  setFileParsedContent: (fileName: string, parsed: string) => void;
 }
 
 const STORAGE_KEY = "presales-preferences";
@@ -104,6 +115,7 @@ function loadPreferences(): Partial<PresalesState> {
         customModels: parsed.customModels ?? undefined,
         vendorName: parsed.vendorName ?? undefined,
         estimationPlanId: parsed.estimationPlanId ?? undefined,
+        quotedRates: parsed.quotedRates ?? undefined,
       };
     }
   } catch {
@@ -123,6 +135,7 @@ function savePreferences(state: PresalesState): void {
       customModels: state.customModels,
       vendorName: state.vendorName,
       estimationPlanId: state.estimationPlanId,
+      quotedRates: state.quotedRates,
     }));
   } catch {
     // Ignore quota errors
@@ -136,12 +149,16 @@ const defaults: PresalesState = {
   modelProvider: DEFAULT_MODEL,
   customModels: [],
   attachments: [],
+  uploadError: null,
   quotation: null,
   header: null,
   sessionId: "",
   quotationTrades: null,
   vendorName: VENDOR_NAME,
   estimationPlanId: "expert-judgment-plan",
+  quotedRates: { ...TRADE_DAILY_RATES },
+  fileTabs: [],
+  activeRightTab: "quotation",
 };
 
 export function PresalesProvider({ children }: { children: ReactNode }) {
@@ -164,6 +181,7 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
     prefs.customModels ?? defaults.customModels
   );
   const [attachments, setAttachments] = useState<File[]>(defaults.attachments);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [quotation, setQuotation] = useState<QuotationRow[] | null>(defaults.quotation);
   const [header, setHeader] = useState<QuotationHeader | null>(defaults.header);
   const [quotationTrades, setQuotationTrades] = useState<TradeRole[] | null>(defaults.quotationTrades);
@@ -173,6 +191,11 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
   const [estimationPlanId, setEstimationPlanId] = useState<string>(
     prefs.estimationPlanId ?? defaults.estimationPlanId
   );
+  const [quotedRates, setQuotedRates] = useState<QuotedRates>(
+    prefs.quotedRates ?? defaults.quotedRates
+  );
+  const [fileTabs, setFileTabs] = useState<FileTab[]>(defaults.fileTabs);
+  const [activeRightTab, setActiveRightTab] = useState<string>(defaults.activeRightTab);
 
   // Avoid syncing on initial mount — only sync on subsequent changes
   const mountedRef = useRef(false);
@@ -193,10 +216,31 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
 
   const addAttachments = useCallback((files: File[]) => {
     setAttachments((prev) => [...prev, ...files]);
+    const newTabs: FileTab[] = files.map((f) => ({
+      id: `file-${crypto.randomUUID()}`,
+      name: f.name,
+      size: f.size,
+      file: f,
+    }));
+    setFileTabs((prev) => [...prev, ...newTabs]);
+    if (newTabs.length > 0) {
+      setActiveRightTab(newTabs[0].id);
+    }
   }, []);
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const closeFileTab = useCallback((tabId: string) => {
+    setFileTabs((prev) => prev.filter((t) => t.id !== tabId));
+    setActiveRightTab((prev) => (prev === tabId ? "quotation" : prev));
+  }, []);
+
+  const setFileParsedContent = useCallback((fileName: string, parsed: string) => {
+    setFileTabs((prev) =>
+      prev.map((t) => (t.name === fileName ? { ...t, parsed } : t)),
+    );
   }, []);
 
   const reset = useCallback(async () => {
@@ -218,6 +262,8 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
     setQuotation(defaults.quotation);
     setHeader(defaults.header);
     setQuotationTrades(defaults.quotationTrades);
+    setFileTabs(defaults.fileTabs);
+    setActiveRightTab(defaults.activeRightTab);
   }, [sessionId]);
 
   const setQuotationResult = useCallback(
@@ -237,8 +283,9 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
       models: customModels,
       vendorName,
       estimationPlanId,
+      quotedRates,
     });
-  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId]);
+  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId, quotedRates]);
 
   // Sync config to backend on changes (skip initial mount)
   useEffect(() => {
@@ -253,26 +300,29 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
       models: customModels,
       vendorName,
       estimationPlanId,
+      quotedRates,
     });
-  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId]);
+  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId, quotedRates]);
 
   // Persist preferences on change
   const currentState: PresalesState = {
     selectedTrades, industry, budgetRange, modelProvider, customModels,
     attachments, quotation, header, sessionId, quotationTrades, vendorName,
-    estimationPlanId,
+    estimationPlanId, quotedRates, uploadError, fileTabs, activeRightTab,
   };
 
   useEffect(() => {
     savePreferences(currentState);
-  }, [selectedTrades, industry, budgetRange, modelProvider, customModels, estimationPlanId]);
+  }, [selectedTrades, industry, budgetRange, modelProvider, customModels, estimationPlanId, quotedRates]);
 
   const value: PresalesContextValue = {
     selectedTrades, industry, budgetRange, modelProvider, customModels, attachments,
-    quotation, header, sessionId, quotationTrades, vendorName, estimationPlanId,
+    quotation, header, sessionId, quotationTrades, vendorName, estimationPlanId, quotedRates,
+    fileTabs, activeRightTab,
     setSelectedTrades, setIndustry, setBudgetRange, setModelProvider, setCustomModels,
-    setAttachments, addAttachments, removeAttachment,
-    setQuotation, setHeader, setQuotationTrades, setQuotationResult, setVendorName, setEstimationPlanId, syncConfig, reset,
+    setAttachments, addAttachments, removeAttachment, uploadError, setUploadError,
+    setQuotation, setHeader, setQuotationTrades, setQuotationResult, setVendorName, setEstimationPlanId, setQuotedRates, syncConfig, reset,
+    setActiveRightTab, closeFileTab, setFileParsedContent,
   };
 
   return (

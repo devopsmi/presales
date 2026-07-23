@@ -3,7 +3,7 @@
 import { Download, FileSpreadsheet, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { QuotationRow, QuotationHeader } from "@/lib/types";
+import type { QuotationRow, QuotationHeader, QuotedRates } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 import { useState } from "react";
 import log from "@/lib/logger";
@@ -12,9 +12,10 @@ interface ExportButtonsProps {
   rows: QuotationRow[];
   header: QuotationHeader;
   trades: TradeRole[];
+  quotedRates?: QuotedRates;
 }
 
-export function ExportButtons({ rows, header, trades }: ExportButtonsProps) {
+export function ExportButtons({ rows, header, trades, quotedRates }: ExportButtonsProps) {
   const [downloading, setDownloading] = useState(false);
 
   async function handleDownloadXlsx() {
@@ -23,7 +24,7 @@ export function ExportButtons({ rows, header, trades }: ExportButtonsProps) {
       const res = await fetch("/api/quotation/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows, header, trades }),
+        body: JSON.stringify({ rows, header, trades, quotedRates }),
       });
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();

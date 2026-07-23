@@ -1,5 +1,6 @@
 import type { TradeRole } from "@/lib/constants";
-import { DEFAULT_MODEL, VENDOR_NAME } from "@/lib/constants";
+import type { QuotedRates } from "@/lib/types";
+import { DEFAULT_MODEL, VENDOR_NAME, TRADE_DAILY_RATES } from "@/lib/constants";
 
 export const DEFAULT_MAX_TOKENS = 32768;
 
@@ -24,6 +25,11 @@ export interface SessionConfig {
   models: ModelConfig[];
   vendorName: string;
   estimationPlanId: string;
+  quotedRates: QuotedRates;
+}
+
+function defaultRates(): QuotedRates {
+  return { ...TRADE_DAILY_RATES };
 }
 
 const DEFAULT_CONFIG: SessionConfig = {
@@ -33,12 +39,13 @@ const DEFAULT_CONFIG: SessionConfig = {
   models: [],
   vendorName: VENDOR_NAME,
   estimationPlanId: "expert-judgment-plan",
+  quotedRates: defaultRates(),
 };
 
 const store = new Map<string, SessionConfig>();
 
 export function getSessionConfig(sessionId: string): SessionConfig {
-  return store.get(sessionId) ?? { ...DEFAULT_CONFIG, models: [], vendorName: VENDOR_NAME };
+  return store.get(sessionId) ?? { ...DEFAULT_CONFIG, models: [], vendorName: VENDOR_NAME, quotedRates: { ...DEFAULT_CONFIG.quotedRates } };
 }
 
 export function updateSessionConfig(
@@ -46,14 +53,15 @@ export function updateSessionConfig(
   patch: Partial<SessionConfig>,
 ): SessionConfig {
   const current = getSessionConfig(sessionId);
-  const updated: SessionConfig = {
-    trades: patch.trades ?? current.trades,
-    budgetRange: patch.budgetRange ?? current.budgetRange,
-    model: patch.model ?? current.model,
-    models: patch.models ?? current.models,
-    vendorName: patch.vendorName ?? current.vendorName,
-    estimationPlanId: patch.estimationPlanId ?? current.estimationPlanId,
-  };
+    const updated: SessionConfig = {
+      trades: patch.trades ?? current.trades,
+      budgetRange: patch.budgetRange ?? current.budgetRange,
+      model: patch.model ?? current.model,
+      models: patch.models ?? current.models,
+      vendorName: patch.vendorName ?? current.vendorName,
+      estimationPlanId: patch.estimationPlanId ?? current.estimationPlanId,
+      quotedRates: patch.quotedRates ?? current.quotedRates,
+    };
   store.set(sessionId, updated);
   return updated;
 }

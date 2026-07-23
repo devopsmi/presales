@@ -2,17 +2,21 @@
 
 export interface SerializedFile {
   name: string;
-  type: "pdf" | "word" | "excel";
+  type: "pdf" | "word" | "excel" | "image";
   data: string; // base64-encoded content
 }
 
-function detectFileType(name: string): "pdf" | "word" | "excel" {
+export interface SerializeResult {
+  files: SerializedFile[];
+  errors: Array<{ name: string; error: string }>;
+}
+
+function detectFileType(name: string): "pdf" | "word" | "excel" | null {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "pdf") return "pdf";
   if (ext === "docx" || ext === "doc") return "word";
   if (ext === "xlsx" || ext === "xls") return "excel";
-  // Default fallback — try to parse as word-like
-  return "word";
+  return null;
 }
 
 export function fileToBase64(file: File): Promise<string> {
@@ -33,20 +37,26 @@ export function fileToBase64(file: File): Promise<string> {
 
 export async function serializeFiles(
   files: File[],
-): Promise<SerializedFile[]> {
+): Promise<SerializeResult> {
   const results: SerializedFile[] = [];
+  const errors: Array<{ name: string; error: string }> = [];
   for (const file of files) {
     try {
+      const type = detectFileType(file.name);
+      if (!type) {
+        errors.push({ name: file.name, error: "不支持的文件类型" });
+        continue;
+      }
       const data = await fileToBase64(file);
       results.push({
         name: file.name,
-        type: detectFileType(file.name),
+        type,
         data,
       });
     } catch (err) {
       console.error(`Failed to serialize file "${file.name}":`, err);
-      // Skip files that fail to read
+      errors.push({ name: file.name, error: `Failed to read file: ${err instanceof Error ? err.message : String(err)}` });
     }
   }
-  return results;
+  return { files: results, errors };
 }

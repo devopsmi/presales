@@ -5,15 +5,18 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { usePresales } from "@/lib/presales-context";
-import { INDUSTRIES, TRADES, INDUSTRY_DEFAULTS, type TradeRole, type Industry } from "@/lib/constants";
-import { useState } from "react";
+import { INDUSTRIES, TRADES, TRADE_DAILY_RATES, INDUSTRY_DEFAULTS, type TradeRole, type Industry } from "@/lib/constants";
+import type { QuotedRates } from "@/lib/types";
+import { useState, useCallback } from "react";
 
 export function TradeSelector() {
-  const { selectedTrades, industry, setSelectedTrades, setIndustry } = usePresales();
+  const { selectedTrades, industry, quotedRates, setSelectedTrades, setIndustry, setQuotedRates } = usePresales();
   const [open, setOpen] = useState(false);
   const [tempTrades, setTempTrades] = useState<TradeRole[]>(selectedTrades);
+  const [tempRates, setTempRates] = useState<QuotedRates>(quotedRates);
 
   function handleIndustryChange(ind: string) {
     setIndustry(ind as Industry);
@@ -26,23 +29,47 @@ export function TradeSelector() {
         if (prev.length <= 1) return prev;
         return prev.filter((t) => t !== role);
       }
+      // Initialize rate from default when newly selected
+      setTempRates((prev) => {
+        if (prev[role] !== undefined) return prev;
+        return { ...prev, [role]: TRADE_DAILY_RATES[role] };
+      });
       return [...prev, role];
     });
   }
 
+  const handleRateChange = useCallback((role: TradeRole, raw: string) => {
+    const val = parseInt(raw, 10);
+    setTempRates((prev) => ({
+      ...prev,
+      [role]: isNaN(val) || val < 0 ? undefined : val,
+    }));
+  }, []);
+
   function handleConfirm() {
     setSelectedTrades(tempTrades);
+    // Only keep rates for selected trades
+    const cleaned: QuotedRates = {};
+    for (const t of tempTrades) {
+      const rate = tempRates[t];
+      cleaned[t] = rate !== undefined && rate > 0 ? rate : TRADE_DAILY_RATES[t];
+    }
+    setQuotedRates(cleaned);
     setOpen(false);
   }
 
   function handleReset() {
     setTempTrades([...INDUSTRY_DEFAULTS[industry]]);
+    setTempRates({ ...TRADE_DAILY_RATES });
   }
 
   const count = selectedTrades.length;
 
+  const rateFor = (role: TradeRole): number =>
+    quotedRates[role] ?? TRADE_DAILY_RATES[role];
+
   return (
-    <Popover open={open} onOpenChange={(o) => { setOpen(o); if (o) setTempTrades([...selectedTrades]); }}>
+    <Popover open={open} onOpenChange={(o) => { setOpen(o); if (o) { setTempTrades([...selectedTrades]); setTempRates({ ...quotedRates }); } }}>
       <PopoverTrigger>
         <button className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
           <Wrench className="size-4" />
@@ -50,7 +77,7 @@ export function TradeSelector() {
           {count > 0 && <span className="text-xs">({count})</span>}
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-80 p-0" align="start">
+      <PopoverContent className="w-96 p-0" align="start" onClick={(e) => e.stopPropagation()}>
         <div className="p-3 pb-0">
           <p className="text-sm font-medium mb-2">选择行业</p>
           <Tabs value={industry} onValueChange={handleIndustryChange}>
@@ -65,20 +92,36 @@ export function TradeSelector() {
         </div>
         <Separator className="my-2" />
         <div className="px-3 pb-1">
-          <p className="text-sm font-medium mb-2">选择工种</p>
-          <div className="space-y-1 max-h-60 overflow-y-auto">
-            {TRADES.map((trade) => (
-              <label key={trade.id} className="flex items-center gap-2 py-1.5 cursor-pointer hover:bg-accent rounded px-1">
-                <Checkbox
-                  checked={tempTrades.includes(trade.id)}
-                  onCheckedChange={() => toggleTrade(trade.id)}
-                />
-                <span className="text-sm flex-1">{trade.label}</span>
-                <span className="text-xs text-muted-foreground">
-                  ¥{trade.dailyRate.toLocaleString()}/人天
-                </span>
-              </label>
-            ))}
+          <p className="text-sm font-medium mb-2">选择工种与报价单价</p>
+          <div className="space-y-1.5 max-h-60 overflow-y-auto">
+            {TRADES.map((trade) => {
+              const checked = tempTrades.includes(trade.id);
+              const rate = tempRates[trade.id] ?? TRADE_DAILY_RATES[trade.id];
+              return (
+                <label key={trade.id} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-accent rounded px-1">
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={() => toggleTrade(trade.id)}
+                  />
+                  <span className="text-sm w-20 shrink-0">{trade.label}</span>
+                  <div className="flex items-center gap-1 flex-1 min-w-0">
+                    <span className="text-xs text-muted-foreground shrink-0">¥</span>
+                    <Input
+                      className="h-7 w-20 text-xs px-1.5"
+                      value={checked ? String(rate) : ""}
+                      disabled={!checked}
+                      onChange={(e) => handleRateChange(trade.id, e.target.value)}
+                      onBlur={() => {
+                        if (checked && (!tempRates[trade.id] || tempRates[trade.id]! <= 0)) {
+                          setTempRates((prev) => ({ ...prev, [trade.id]: TRADE_DAILY_RATES[trade.id] }));
+                        }
+                      }}
+                    />
+                    <span className="text-[10px] text-muted-foreground shrink-0">/人天</span>
+                  </div>
+                </label>
+              );
+            })}
           </div>
         </div>
         <Separator />

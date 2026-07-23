@@ -44,6 +44,9 @@ export const BUDGET_PRESETS = [
 
 
 export const MAX_FILE_SIZE_MB = 10;
+export const MAX_FILE_COUNT = 10;
+export const MAX_SINGLE_FILE_SIZE_MB = 20;
+export const ALLOWED_FILE_TYPES = ["pdf", "word", "excel", "image"] as const;
 export const DEFAULT_MODEL = "deepseek-v3";
 export const DEFAULT_INDUSTRY: Industry = "其他";
 

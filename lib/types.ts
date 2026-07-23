@@ -3,6 +3,21 @@
  * Zero LangChain imports. Safe to import from anywhere.
  */
 import type { TradeRole } from "@/lib/constants";
+
+/** Per-trade daily rate overrides. Keys are TradeRole IDs; undefined entries fall back to TRADE_DAILY_RATES defaults. */
+export type QuotedRates = Partial<Record<TradeRole, number>>;
+
+// ---------------------------------------------------------------------------
+// FileTab — uploaded file shown as a tab in the right panel
+// ---------------------------------------------------------------------------
+
+export interface FileTab {
+  id: string;
+  name: string;
+  size: number;
+  file: File;
+  parsed?: string;
+}
 import type { ModelConfig } from "@/lib/session-config";
 
 // ---------------------------------------------------------------------------

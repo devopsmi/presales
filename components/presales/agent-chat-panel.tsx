@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useCallback, useRef } from "react";
+import { useEffect, useMemo, useCallback, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { MessageList } from "@/components/agent-elements/message-list";
@@ -16,6 +16,47 @@ import { usePresales } from "@/lib/presales-context";
 import { serializeFiles } from "@/lib/file-utils";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
+
+interface QuotationExtract {
+  header: QuotationHeader;
+  rows: QuotationRow[];
+  trades: TradeRole[];
+}
+
+interface ParsedFileEntry {
+  name: string;
+  type: string;
+  parsed: string;
+}
+
+function extractFileParserOutput(
+  part: { type: string; state?: string; output?: unknown },
+): ParsedFileEntry[] | null {
+  const isParserTool =
+    part.type === "tool-subagent_file_parser" || part.type === "tool-pipeline_parser";
+  if (!isParserTool || part.state !== "output-available") {
+    return null;
+  }
+  try {
+    const output = typeof part.output === "string" ? JSON.parse(part.output) : part.output;
+    if (output && Array.isArray((output as any).parsedFiles)) {
+      return (output as any).parsedFiles as ParsedFileEntry[];
+    }
+  } catch {}
+  return null;
+}
+
+function extractFileParserFromMessages(
+  messages: Array<{ parts?: Array<{ type: string; state?: string; output?: unknown }> }>,
+): ParsedFileEntry[] | null {
+  for (const msg of [...messages].reverse()) {
+    for (const part of msg.parts ?? []) {
+      const files = extractFileParserOutput(part);
+      if (files) return files;
+    }
+  }
+  return null;
+}
 
 interface QuotationExtract {
   header: QuotationHeader;
@@ -72,18 +113,39 @@ export function AgentChatPanel() {
     sessionId,
     attachments,
     removeAttachment,
+    addAttachments,
     setAttachments,
+    uploadError, setUploadError,
     setQuotationResult,
     setQuotationTrades,
     setQuotation,
     setHeader,
     syncConfig,
+    setFileParsedContent,
   } = usePresales();
 
   const filesRef = useRef<File[]>([]);
   useEffect(() => {
     filesRef.current = attachments;
   }, [attachments]);
+
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  function handleFilesFromDrop(files: File[]) {
+    const valid: File[] = [];
+    const rejected: string[] = [];
+    for (const f of files) {
+      if (f.size > 10 * 1024 * 1024) {
+        rejected.push(`${f.name} (${(f.size / 1024 / 1024).toFixed(1)}MB > 10MB)`);
+        continue;
+      }
+      valid.push(f);
+    }
+    if (valid.length > 0) addAttachments(valid);
+    if (rejected.length > 0) {
+      setUploadError(`以下文件超过 10MB 限制: ${rejected.join(", ")}`);
+    }
+  }
 
   // filesRef is read at fetch call time (async), not during render — the refs lint is a false positive here
   // eslint-disable-next-line react-hooks/refs
@@ -92,12 +154,20 @@ export function AgentChatPanel() {
     async fetch(url, init) {
       if (init?.body) {
         const bodyObj = JSON.parse(init.body as string);
-        const files = await serializeFiles(filesRef.current);
+        const { files, errors } = await serializeFiles(filesRef.current);
+        if (errors.length > 0) {
+          setUploadError(`文件处理失败: ${errors.map(e => `${e.name}: ${e.error}`).join("; ")}`);
+        }
         if (files.length > 0) {
           bodyObj.files = files;
           init.body = JSON.stringify(bodyObj);
         }
-        filesRef.current = [];
+        // Only remove files that were serialized, preserving any
+        // files added concurrently during the async operation.
+        const snapshotLen = filesRef.current.length;
+        filesRef.current = filesRef.current.slice(snapshotLen);
+        // Sync React state with ref to clear file chips from UI
+        setAttachments(filesRef.current);
       }
       return fetch(url, init);
     },
@@ -109,6 +179,12 @@ export function AgentChatPanel() {
       const q = extractQuotationFromMessages([options.message]);
       if (q) {
         setQuotationResult(q.header, q.rows, q.trades);
+      }
+      const parsedFiles = extractFileParserFromMessages([options.message]);
+      if (parsedFiles) {
+        for (const f of parsedFiles) {
+          setFileParsedContent(f.name, f.parsed);
+        }
       }
     },
   });
@@ -140,7 +216,15 @@ export function AgentChatPanel() {
     if (q) {
       setQuotationResult(q.header, q.rows, q.trades);
     }
-  }, [messages, setQuotationResult]);
+    const parsedFiles = extractFileParserFromMessages(
+      messages as Array<{ content?: string; parts?: Array<{ type: string; text?: string }> }>,
+    );
+    if (parsedFiles) {
+      for (const f of parsedFiles) {
+        setFileParsedContent(f.name, f.parsed);
+      }
+    }
+  }, [messages, setQuotationResult, setFileParsedContent]);
 
   useEffect(() => {
     if (status === "ready" && messages.length === 0) {
@@ -153,11 +237,28 @@ export function AgentChatPanel() {
   async function handleSend(message: { role: "user"; content: string }) {
     await syncConfig();
     sendMessage({ text: message.content });
-    setAttachments([]);
+    // Attachments cleared by transport.fetch after serialization,
+    // NOT here — clearing here races with the async fetch.
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div
+      className="flex flex-col h-full"
+      onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+      onDragLeave={(e) => {
+        // Only set false when leaving the container, not child elements
+        if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) {
+          setIsDragOver(false);
+        }
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setIsDragOver(false);
+        if (e.dataTransfer?.files) {
+          handleFilesFromDrop(Array.from(e.dataTransfer.files));
+        }
+      }}
+    >
       <div className="flex-1 min-h-0 overflow-scroll scrollbar-none">
         <MessageList messages={messages} status={status} />
       </div>
@@ -169,6 +270,20 @@ export function AgentChatPanel() {
         placeholder="请输入您的产品需求..."
         attachedFiles={attachedFiles}
         onRemoveFile={handleRemoveFile}
+        isDragOver={isDragOver}
+        onPaste={(e) => {
+          const items = e.clipboardData?.items;
+          if (!items) return;
+          const files: File[] = [];
+          for (const item of Array.from(items)) {
+            const file = item.getAsFile();
+            if (file) files.push(file);
+          }
+          if (files.length > 0) {
+            e.preventDefault();
+            handleFilesFromDrop(files);
+          }
+        }}
         leftActions={
           <div className="flex items-center gap-1 flex-wrap">
             <FileUploadMenu />

@@ -1,9 +1,10 @@
 import type { UIMessage } from "ai";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { HumanMessage } from "@langchain/core/messages";
 import type { Attachment, SseMessage } from "@/lib/types";
 import { createModelInstance } from "@/lib/agent/llm";
 import { createPresalesAgent, getFileStatusMessage } from "@/lib/agent/main-agent";
 import { getSessionConfig } from "@/lib/session-config";
+import { MAX_FILE_COUNT, MAX_SINGLE_FILE_SIZE_MB, ALLOWED_FILE_TYPES } from "@/lib/constants";
 import log from "@/lib/logger";
 
 export const runtime = "nodejs";
@@ -23,6 +24,55 @@ interface SerializedFile {
   name: string;
   type: "pdf" | "word" | "excel" | "image";
   data: string;
+}
+
+interface UploadError {
+  index: number;
+  name: string;
+  reason: string;
+}
+
+function validateFiles(files: SerializedFile[]): {
+  valid: SerializedFile[];
+  errors: UploadError[];
+} {
+  if (files.length > MAX_FILE_COUNT) {
+    return {
+      valid: [],
+      errors: [{ index: -1, name: "", reason: `文件数量超过限制 (最多 ${MAX_FILE_COUNT} 个)` }],
+    };
+  }
+
+  const valid: SerializedFile[] = [];
+  const errors: UploadError[] = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (!(ALLOWED_FILE_TYPES as readonly string[]).includes(f.type)) {
+      errors.push({
+        index: i,
+        name: f.name,
+        reason: `不支持的文件类型 "${f.type}"，允许的类型: ${ALLOWED_FILE_TYPES.join(", ")}`,
+      });
+      continue;
+    }
+    if (!f.data || typeof f.data !== "string" || f.data.length === 0) {
+      errors.push({ index: i, name: f.name, reason: "文件数据为空" });
+      continue;
+    }
+    const decodedSize = Buffer.byteLength(f.data, "base64");
+    if (decodedSize > MAX_SINGLE_FILE_SIZE_MB * 1024 * 1024) {
+      errors.push({
+        index: i,
+        name: f.name,
+        reason: `文件过大 (${(decodedSize / 1024 / 1024).toFixed(1)}MB)，单文件限制 ${MAX_SINGLE_FILE_SIZE_MB}MB`,
+      });
+      continue;
+    }
+    valid.push(f);
+  }
+
+  return { valid, errors };
 }
 
 function collectRawAttachments(files: SerializedFile[]): Attachment[] {
@@ -62,7 +112,21 @@ export async function POST(req: Request) {
     if (!rawText) return jsonErr("No text content", 400);
 
     const uploadedFiles: SerializedFile[] = Array.isArray(body.files) ? body.files : [];
-    const attachments = collectRawAttachments(uploadedFiles);
+    const { valid, errors } = validateFiles(uploadedFiles);
+
+    if (errors.length > 0) {
+      if (valid.length === 0) {
+        return jsonErr(`文件验证失败: ${errors.map(e => e.reason).join("; ")}`, 400);
+      }
+      log.warn("some files rejected during upload", {
+        sessionId,
+        rejectedCount: errors.length,
+        acceptedCount: valid.length,
+        errors: errors.map(e => ({ name: e.name, reason: e.reason })),
+      });
+    }
+
+    const attachments = collectRawAttachments(valid);
     const config = getSessionConfig(sessionId ?? "");
 
     const modelCfg = config.models.find((m) => m.id === config.model);
@@ -83,11 +147,10 @@ export async function POST(req: Request) {
         try {
           const sid = sessionId || "default";
           const fileStatus = getFileStatusMessage(sid);
-          const agentMessages = [];
-          if (fileStatus) {
-            agentMessages.push(new SystemMessage(fileStatus));
-          }
-          agentMessages.push(new HumanMessage({ content: rawText, id: `msg-${Date.now()}` }));
+          const userContent = fileStatus
+            ? `${fileStatus}\n\n用户消息: ${rawText}`
+            : rawText;
+          const agentMessages = [new HumanMessage({ content: userContent, id: `msg-${Date.now()}` })];
 
           const run = await agent.streamEvents(
             { messages: agentMessages },

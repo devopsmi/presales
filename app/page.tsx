@@ -2,7 +2,7 @@
 
 import { usePresales, PresalesProvider } from "@/lib/presales-context";
 import { AgentChatPanel } from "@/components/presales/agent-chat-panel";
-import { ResultPanel } from "@/components/presales/result-panel";
+import { FileTabPanel } from "@/components/presales/file-tab-panel";
 import { Button } from "@/components/ui/button";
 import { RotateCcw } from "lucide-react";
 
@@ -40,12 +40,7 @@ function MainLayout() {
         </div>
       </div>
       <div className="hidden lg:flex lg:w-[40%] flex-col">
-        <div className="px-4 py-3 border-b bg-background">
-          <h2 className="text-sm font-semibold">报价结果</h2>
-        </div>
-        <div className="flex-1 min-h-0 overflow-hidden">
-          <ResultPanel />
-        </div>
+        <FileTabPanel />
       </div>
     </div>
   );

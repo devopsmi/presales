@@ -176,6 +176,7 @@ function computeQuotationResult(
   header: QuotationHeader,
   selectedTrades: TradeRole[],
   budgetRange: [number, number],
+  quotedRates: Partial<Record<TradeRole, number>> = TRADE_DAILY_RATES,
 ) {
   const tradeTotals: Record<string, number> = {};
   for (const row of rows) {
@@ -188,7 +189,7 @@ function computeQuotationResult(
 
   let totalCost = 0;
   for (const [trade, manDays] of Object.entries(tradeTotals)) {
-    const rate = TRADE_DAILY_RATES[trade as TradeRole] ?? 2000;
+    const rate = quotedRates[trade as TradeRole] ?? TRADE_DAILY_RATES[trade as TradeRole] ?? 2000;
     totalCost += manDays * rate;
   }
 
@@ -262,6 +263,7 @@ function buildParseFilesTool(model: BaseChatModel) {
         status: "ok",
         parsedCount: parsed.length,
         unparsedCount: unparsed.length,
+        parsedFiles: parsed.map((f) => ({ name: f.name, type: f.type, parsed: f.parsed })),
         message: parsed.length > 0
           ? `文件解析完成：${parsed.length} 个已解析。${unparsed.length ? ` ${unparsed.length} 个解析失败。` : ""}请使用 query_file 查看各文件内容并汇总需求简报。`
           : "没有文件需要解析。",
@@ -399,6 +401,7 @@ function buildEstimateHoursTool(model: BaseChatModel) {
         result.header,
         sessionConfig.trades,
         sessionConfig.budgetRange,
+        sessionConfig.quotedRates,
       );
       return JSON.stringify(quotation);
     },

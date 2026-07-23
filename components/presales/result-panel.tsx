@@ -7,7 +7,7 @@ import { usePresales } from "@/lib/presales-context";
 import { FileText } from "lucide-react";
 
 export function ResultPanel() {
-  const { quotation, header, quotationTrades } = usePresales();
+  const { quotation, header, quotationTrades, quotedRates } = usePresales();
 
   if (!quotation || quotation.length === 0 || !header) {
     return (
@@ -24,7 +24,7 @@ export function ResultPanel() {
   return (
     <div className="flex flex-col h-full">
       <QuotationHeader header={header} trades={trades} />
-      <ExportButtons rows={quotation} header={header} trades={trades} />
+      <ExportButtons rows={quotation} header={header} trades={trades} quotedRates={quotedRates} />
       <div className="flex-1 overflow-auto p-0">
         <QuotationTable rows={quotation} trades={trades} />
       </div>

@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { generateQuotationXlsx } from "@/lib/xlsx-generator";
-import type { QuotationRow, QuotationHeader } from "@/lib/types";
+import type { QuotationRow, QuotationHeader, QuotedRates } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 import log from "@/lib/logger";
 
@@ -12,13 +12,14 @@ export async function POST(req: NextRequest) {
     const rows: QuotationRow[] = body.rows ?? [];
     const header: QuotationHeader = body.header ?? {};
     const trades: TradeRole[] = body.trades ?? [];
+    const quotedRates: QuotedRates | undefined = body.quotedRates;
     log.info("Export request received", { rowCount: rows.length });
 
     if (!rows.length) {
       return NextResponse.json({ error: "No rows provided" }, { status: 400 });
     }
 
-    const buffer = await generateQuotationXlsx(rows, trades, header);
+    const buffer = await generateQuotationXlsx(rows, trades, header, quotedRates);
 
     return new NextResponse(new Uint8Array(buffer), {
       headers: {

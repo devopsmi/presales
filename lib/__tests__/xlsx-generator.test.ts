@@ -43,7 +43,7 @@ async function testAll() {
   const magic = buffer[0] === 0x50 && buffer[1] === 0x4b;
   assert(magic, "Output has ZIP magic bytes (valid .xlsx)");
 
-  // Re-parse to verify content (XLSX is a compressed ZIP, can't grep raw bytes)
+  // Re-parse to verify content
   const reparsed = new ExcelJS.Workbook();
   const arrayBuf = new Uint8Array(buffer).buffer.slice(0);
   await reparsed.xlsx.load(arrayBuf);
@@ -51,67 +51,105 @@ async function testAll() {
   assert(reparsedSheet !== undefined, "Re-parsed workbook contains '报价单' worksheet");
 
   if (reparsedSheet) {
-    // Verify header info rows (rows 1-4)
-    const customerCell = String(reparsedSheet.getCell(1, 1).value ?? "");
-    assert(customerCell.includes("测试客户"), `Row 1 contains customer name (got "${customerCell}")`);
+    // ---- Row 1: Title ----
+    const titleCell = String(reparsedSheet.getCell(1, 1).value ?? "");
+    assert(
+      titleCell.includes("测试单位") && titleCell.includes("软件报价清单"),
+      `Row 1 title contains vendor name and label (got "${titleCell.slice(0, 50)}")`,
+    );
 
-    const projectCell = String(reparsedSheet.getCell(2, 1).value ?? "");
-    assert(projectCell.includes("测试项目"), `Row 2 contains project name (got "${projectCell}")`);
+    // ---- Row 2: Client name + Vendor ----
+    const customerCell = String(reparsedSheet.getCell("C2").value ?? "");
+    assert(customerCell === "测试客户", `Row 2 C2 = customer name (got "${customerCell}")`);
 
-    const dateCell = String(reparsedSheet.getCell(3, 1).value ?? "");
-    assert(dateCell.includes("2026-07-20"), `Row 3 contains quote date`);
+    const vendorCell = String(reparsedSheet.getCell("F2").value ?? "");
+    assert(vendorCell === "测试单位", `Row 2 F2 = vendor name (got "${vendorCell}")`);
 
-    const vendorCell = String(reparsedSheet.getCell(4, 1).value ?? "");
-    assert(vendorCell.includes("测试单位"), `Row 4 contains vendor name`);
+    // ---- Row 3: Project name + Date ----
+    const projectCell = String(reparsedSheet.getCell("C3").value ?? "");
+    assert(projectCell === "测试项目", `Row 3 C3 = project name (got "${projectCell}")`);
 
-    // Verify column headers row (row 6) contains trade labels
-    const colHeadersRow = reparsedSheet.getRow(6);
-    const colHeaderVal = String(colHeadersRow.getCell(1).value ?? "");
-    assert(colHeaderVal === "序号", `Column header row [1] is '序号' (got "${colHeaderVal}")`);
+    // Date is stored as a Date object in ExcelJS; verify via numFmt
+    const dateCell = reparsedSheet.getCell("F3");
+    assert(
+      dateCell.numFmt === "yyyy-mm-dd",
+      `Row 3 F3 has date number format (got "${dateCell.numFmt}")`,
+    );
 
-    const tradeHeaderVal = String(colHeadersRow.getCell(7).value ?? "");
-    assert(tradeHeaderVal === "前端开发", `Column header row [7] is '前端开发' trade label (got "${tradeHeaderVal}")`);
+    // ---- Row 4: Column headers ----
+    const colHeaderA4 = String(reparsedSheet.getCell("A4").value ?? "");
+    assert(colHeaderA4 === "序号", `Row 4 A4 = '序号' (got "${colHeaderA4}")`);
 
-    const designHeaderVal = String(colHeadersRow.getCell(9).value ?? "");
-    assert(designHeaderVal === "UI 设计", `Column header row [9] is 'UI 设计' trade label (got "${designHeaderVal}")`);
+    const colHeaderG4 = String(reparsedSheet.getCell(4, 7).value ?? "");
+    assert(colHeaderG4 === "前端开发", `Row 4 col 7 = '前端开发' (got "${colHeaderG4}")`);
 
-    const remarkHeaderVal = String(colHeadersRow.getCell(10).value ?? "");
-    assert(remarkHeaderVal === "备注", `Column header row [10] is '备注' (got "${remarkHeaderVal}")`);
+    const colHeaderI4 = String(reparsedSheet.getCell(4, 9).value ?? "");
+    assert(colHeaderI4 === "UI 设计", `Row 4 col 9 = 'UI 设计' (got "${colHeaderI4}")`);
 
-    // Verify data rows
-    const firstDataRow = reparsedSheet.getRow(7);
-    const seqVal = firstDataRow.getCell(1).value;
-    assert(seqVal === 1, `First data row seq=1 (got ${String(seqVal)})`);
+    const colHeaderJ4 = String(reparsedSheet.getCell(4, 10).value ?? "");
+    assert(colHeaderJ4 === "备注", `Row 4 col 10 = '备注' (got "${colHeaderJ4}")`);
 
-    const moduleCell = reparsedSheet.getCell(7, 2);
+    // ---- Header style checks ----
+    const headerFont = reparsedSheet.getCell("A4").font;
+    assert(headerFont?.bold === true, "Header row font is bold");
+
+    // ---- Data rows (start at row 5) ----
+    const seqCell = reparsedSheet.getCell(5, 1).value;
+    assert(seqCell === 1, `First data row seq=1 (got ${String(seqCell)})`);
+
+    const moduleCell = reparsedSheet.getCell(5, 2);
     assert(moduleCell.value === "系统设计", `Module cell value (got ${String(moduleCell.value)})`);
 
-    // Verify trade values
-    const backendVal = reparsedSheet.getCell(7, 8).value;
+    // Trade value (backend col 8)
+    const backendVal = reparsedSheet.getCell(5, 8).value;
     assert(backendVal === 3, `Backend trade value (got ${String(backendVal)})`);
 
-    // Verify null trade value becomes "-"
-    const nullTradeCell = reparsedSheet.getCell(10, 8);
+    // Null trade value becomes "-"
+    const nullTradeCell = reparsedSheet.getCell(8, 8);
     assert(nullTradeCell.value === "-", `Null trade value rendered as '-' (got ${String(nullTradeCell.value)})`);
 
-    // Verify empty remark becomes "-"
-    const remarkCell = reparsedSheet.getCell(7, 10);
+    // Empty remark becomes "-"
+    const remarkCell = reparsedSheet.getCell(5, 10);
     assert(remarkCell.value === "-", `Empty remark rendered as '-' (got ${String(remarkCell.value)})`);
 
-    // Verify non-empty remark
-    const remarkCellReal = reparsedSheet.getCell(9, 10);
+    // Non-empty remark
+    const remarkCellReal = reparsedSheet.getCell(7, 10);
     assert(remarkCellReal.value === "详见原型", `Non-empty remark (got ${String(remarkCellReal.value)})`);
 
-    // Verify merge logic: count merges
+    // ---- Merge logic ----
     const merges = (reparsedSheet as unknown as { _merges: Record<string, unknown> })._merges;
     const mergeCount = merges ? Object.keys(merges).length : 0;
-    // Expected merges:
-    //   col 2 (module): "系统设计" rows 7-8, "可视化大屏" rows 9-10 → 2 merges
-    //   col 3 (sub_module): "运营看板" rows 9-10 → 1 merge
-    //   col 4 (function): unique per row → 0 merges
-    //   col 5 (sub_function): unique per row → 0 merges
-    // Total expected: 3
-    assert(mergeCount === 3, `Merge logic: expected 3 merges, got ${mergeCount}`);
+    // Data merges (3): module col B rows 5-6, module col B rows 7-8, sub_module col C rows 7-8
+    // Title merge (1): A1 across all cols
+    // Meta merges: A2:B2, C2:D2, F2:J2, A3:B3, C3:D3, F3:J3 → 6 merges
+    // Summary label merges (7): A-F for rows S..S+6
+    // Summary value merges (4): trade cols for rows S+3..S+6 (工时费合计, 利润, 税金, 合计)
+    // Expected: 3 (data) + 1 (title) + 6 (meta) + 7 (summary labels) + 4 (summary values) = 21
+    assert(mergeCount === 21, `Merge logic: expected 21 merges, got ${mergeCount}`);
+
+    // ---- Bottom summary section ----
+    // Data ends at row 8, so summary starts at row 10 (8+2)
+    const sumRow = reparsedSheet.getCell(10, 1).value;
+    assert(sumRow === "工时合计", `Summary row 10 label = '工时合计' (got ${String(sumRow)})`);
+
+    const unitPriceRow = reparsedSheet.getCell(11, 1).value;
+    assert(unitPriceRow === "工时单价", `Summary row 11 label = '工时单价' (got ${String(unitPriceRow)})`);
+
+    // Verify a formula exists in the 工时合计 row
+    const sumFormulaCell = reparsedSheet.getCell(10, 7); // G10 = SUM for frontend
+    const sumCellVal = sumFormulaCell.value;
+    assert(
+      typeof sumCellVal === "object" && sumCellVal !== null && "formula" in sumCellVal,
+      `工时合计 cell has formula object (got ${typeof sumCellVal})`,
+    );
+
+    // Verify frontend daily rate
+    const rateCell = reparsedSheet.getCell(11, 7); // G11 = frontend daily rate
+    assert(rateCell.value === 2000, `Frontend daily rate = 2000 (got ${rateCell.value})`);
+
+    // Verify final 合计 row exists
+    const finalRow = reparsedSheet.getCell(16, 1).value;
+    assert(finalRow === "合计", `Final summary row label = '合计' (got ${String(finalRow)})`);
   }
 
   // Test with empty rows
