@@ -94,9 +94,23 @@ export const ToolRenderer = memo(function ToolRenderer({
     return <McpTool part={part} mcpInfo={mcpInfo} chatStatus={chatStatus} />;
   }
 
-  // Registry-based generic tools (Read, Grep, Glob, WebFetch, etc.)
+  // Registry-based generic tools (Read, Grep, Glob, WebFetch, presales tools, etc.)
   const meta = toolRegistry[partType];
   if (meta) {
+    // Custom renderer for registry-based tools (e.g. presales decomposer progress)
+    const registryToolName = partType.startsWith("tool-") ? partType.slice(5) : partType;
+    if (toolRenderers && toolRenderers[registryToolName]) {
+      const CustomRenderer = toolRenderers[registryToolName];
+      return (
+        <CustomRenderer
+          name={registryToolName}
+          input={(part.input ?? {}) as Record<string, unknown>}
+          output={part.output}
+          status={deriveToolStatus(part, chatStatus)}
+        />
+      );
+    }
+
     const { isPending, isError } = getToolStatus(part, chatStatus);
     return (
       <GenericTool

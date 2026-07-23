@@ -12,6 +12,8 @@ import { BudgetInput } from "./budget-input";
 import { ModelPicker } from "./model-picker";
 import { VendorNameInput } from "./vendor-name-input";
 import { EstimationPlanPicker } from "./estimation-plan-picker";
+import { DecomposerProgressCard } from "./decomposer-progress-card";
+import { FileParserCard, GrillMeCard, EstimatorCard } from "./presales-tool-cards";
 import { usePresales } from "@/lib/presales-context";
 import { serializeFiles } from "@/lib/file-utils";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
@@ -131,6 +133,11 @@ export function AgentChatPanel() {
 
   const [isDragOver, setIsDragOver] = useState(false);
 
+  // Guards: prevent repeated JSON.parse + message scanning on every SSE delta.
+  // Reset when a new user message is sent (handleSend).
+  const quotationExtractedRef = useRef(false);
+  const fileParserExtractedRef = useRef(false);
+
   function handleFilesFromDrop(files: File[]) {
     const valid: File[] = [];
     const rejected: string[] = [];
@@ -176,14 +183,20 @@ export function AgentChatPanel() {
   const { messages, status, sendMessage, stop } = useChat({
     transport,
     onFinish: (options) => {
-      const q = extractQuotationFromMessages([options.message]);
-      if (q) {
-        setQuotationResult(q.header, q.rows, q.trades);
+      if (!quotationExtractedRef.current) {
+        const q = extractQuotationFromMessages([options.message]);
+        if (q) {
+          quotationExtractedRef.current = true;
+          setQuotationResult(q.header, q.rows, q.trades);
+        }
       }
-      const parsedFiles = extractFileParserFromMessages([options.message]);
-      if (parsedFiles) {
-        for (const f of parsedFiles) {
-          setFileParsedContent(f.name, f.parsed);
+      if (!fileParserExtractedRef.current) {
+        const parsedFiles = extractFileParserFromMessages([options.message]);
+        if (parsedFiles) {
+          fileParserExtractedRef.current = true;
+          for (const f of parsedFiles) {
+            setFileParsedContent(f.name, f.parsed);
+          }
         }
       }
     },
@@ -210,21 +223,17 @@ export function AgentChatPanel() {
   );
 
   useEffect(() => {
-    const q = extractQuotationFromMessages(
-      messages as Array<{ content?: string; parts?: Array<{ type: string; text?: string }> }>,
-    );
-    if (q) {
-      setQuotationResult(q.header, q.rows, q.trades);
-    }
+    if (fileParserExtractedRef.current) return;
     const parsedFiles = extractFileParserFromMessages(
       messages as Array<{ content?: string; parts?: Array<{ type: string; text?: string }> }>,
     );
     if (parsedFiles) {
+      fileParserExtractedRef.current = true;
       for (const f of parsedFiles) {
         setFileParsedContent(f.name, f.parsed);
       }
     }
-  }, [messages, setQuotationResult, setFileParsedContent]);
+  }, [messages, setFileParsedContent]);
 
   useEffect(() => {
     if (status === "ready" && messages.length === 0) {
@@ -235,6 +244,8 @@ export function AgentChatPanel() {
   }, [status, messages.length, setQuotation, setHeader, setQuotationTrades]);
 
   async function handleSend(message: { role: "user"; content: string }) {
+    quotationExtractedRef.current = false;
+    fileParserExtractedRef.current = false;
     await syncConfig();
     sendMessage({ text: message.content });
     // Attachments cleared by transport.fetch after serialization,
@@ -260,7 +271,16 @@ export function AgentChatPanel() {
       }}
     >
       <div className="flex-1 min-h-0 overflow-scroll scrollbar-none">
-        <MessageList messages={messages} status={status} />
+        <MessageList
+          messages={messages}
+          status={status}
+          toolRenderers={{
+            subagent_decomposer: DecomposerProgressCard,
+            subagent_file_parser: FileParserCard,
+            grill_me: GrillMeCard,
+            subagent_estimator: EstimatorCard,
+          }}
+        />
       </div>
       <InputBar
         className="[&_.max-w-an]:max-w-none"

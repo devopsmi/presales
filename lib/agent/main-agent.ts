@@ -30,7 +30,7 @@ import type { Attachment } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
 import { TRADE_DAILY_RATES } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
-import type { PipelineStage, StoredFile } from "@/lib/agent/state";
+import type { PipelineStage, DecomposerProgress, StoredFile } from "@/lib/agent/state";
 import { getSessionConfig } from "@/lib/session-config";
 import { runFileParser } from "@/lib/agent/sub-agents/file-parser";
 import { runDecomposer } from "@/lib/agent/sub-agents/decomposer";
@@ -129,6 +129,11 @@ export function clearSessionCache(sessionId: string): boolean {
   return sessionCaches.delete(sessionId);
 }
 
+export function getDecomposerProgress(sessionId: string): DecomposerProgress | null {
+  const cache = sessionCaches.get(sessionId);
+  return cache?.decomposerProgress ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Skill prompts
 // ---------------------------------------------------------------------------
@@ -153,6 +158,7 @@ interface PipelineCache {
   rows: QuotationRow[];
   header: QuotationHeader | null;
   fileStore: Map<number, StoredFile>;
+  decomposerProgress: DecomposerProgress | null;
 }
 
 function createCache(): PipelineCache {
@@ -164,6 +170,7 @@ function createCache(): PipelineCache {
     rows: [],
     header: null,
     fileStore: new Map(),
+    decomposerProgress: null,
   };
 }
 
@@ -346,7 +353,17 @@ function buildDecomposeTool(model: BaseChatModel) {
       }
 
       logger.info("decompose called", { sessionId });
-      const result = await runDecomposer(model, { structuredBrief: cache.structuredBrief });
+
+      // Clear stale progress before starting
+      cache.decomposerProgress = null;
+
+      const result = await runDecomposer(
+        model,
+        { structuredBrief: cache.structuredBrief },
+        (progress) => {
+          cache.decomposerProgress = progress;
+        },
+      );
 
       cache.stage = "decomposed";
       cache.rows = result.rows;

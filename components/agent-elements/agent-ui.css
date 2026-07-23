@@ -178,6 +178,19 @@
   }
 }
 
+/* Progress bar shimmer — used by presales tool cards */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(100%);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
 .an-text-shimmer {
   display: inline-block;
   background-size: 250% 100%;

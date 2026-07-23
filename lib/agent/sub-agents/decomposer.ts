@@ -7,6 +7,7 @@
  * Each round outputs compact {parent → children} mappings to minimize token waste.
  * Final stitch() reconstructs full QuotationRow[] from the forward-reference chain.
  */
+import type { DecomposerProgress } from "@/lib/agent/state";
 import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import fs from "fs";
@@ -523,6 +524,7 @@ function buildR4Prompt(
 export async function runDecomposer(
   model: BaseChatModel,
   input: { structuredBrief: string },
+  onProgress?: (progress: DecomposerProgress) => void,
 ): Promise<DecomposerOutput> {
   const brief = input.structuredBrief;
   if (!brief || !brief.trim()) {
@@ -532,6 +534,7 @@ export async function runDecomposer(
   logger.info("decomposer start (BFS)", { briefLen: brief.length });
 
   // ── Round 1: Modules (flat string array) ──
+  onProgress?.({ stage: "识别产品模块", round: 0, totalRounds: 4, message: "正在分析产品模块划分..." });
   const r1Raw = await invokeAndExtractJson(
     model,
     "decomposer_r1",
@@ -539,8 +542,10 @@ export async function runDecomposer(
     `项目简报：\n\n${brief}\n\n请列出所有一级模块。输出格式：["模块A", "模块B"]`,
   );
   const modules = parseModules(r1Raw);
+  onProgress?.({ stage: "识别产品模块", round: 1, totalRounds: 4, message: `已识别 ${modules.length} 个模块` });
 
   // ── Round 2: Sub-Modules ({module → [sub_modules]}) ──
+  onProgress?.({ stage: "拆解子模块", round: 1, totalRounds: 4, message: "正在拆解子模块..." });
   const r2Raw = await invokeAndExtractJson(
     model,
     "decomposer_r2",
@@ -549,8 +554,10 @@ export async function runDecomposer(
   );
   const r2Pairs = parseSubModules(r2Raw, modules);
   const subModules = r2Pairs;
+  onProgress?.({ stage: "拆解子模块", round: 2, totalRounds: 4, message: `已拆解 ${r2Pairs.length} 个子模块` });
 
   // ── Round 3: Functions ({sub_module → [functions]}) ──
+  onProgress?.({ stage: "识别功能点", round: 2, totalRounds: 4, message: "正在识别功能点..." });
   const r3Raw = await invokeAndExtractJson(
     model,
     "decomposer_r3",
@@ -558,8 +565,10 @@ export async function runDecomposer(
     buildR3Prompt(r2Pairs, brief),
   );
   const r3Pairs = parseFunctions(r3Raw, r2Pairs);
+  onProgress?.({ stage: "识别功能点", round: 3, totalRounds: 4, message: `已识别 ${r3Pairs.length} 个功能点` });
 
   // ── Round 4: Leaves ({function → {sub_function: description}}) ──
+  onProgress?.({ stage: "生成子功能详情", round: 3, totalRounds: 4, message: "正在生成子功能详情..." });
   const r4Raw = await invokeAndExtractJson(
     model,
     "decomposer_r4",
@@ -567,6 +576,7 @@ export async function runDecomposer(
     buildR4Prompt(r3Pairs, r2Pairs, brief),
   );
   const r4Triples = parseLeaves(r4Raw, r3Pairs);
+  onProgress?.({ stage: "生成子功能详情", round: 4, totalRounds: 4, message: `已生成 ${r4Triples.length} 个子功能` });
 
   // ── Stitch: reconstruct QuotationRow[] from the forward-reference chain ──
   const rows = stitch(r2Pairs, r3Pairs, r4Triples);

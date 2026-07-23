@@ -75,3 +75,14 @@ export interface StoredFile {
   body: string;
   parsed: string;
 }
+
+// ---------------------------------------------------------------------------
+// Decomposer progress — emitted between BFS rounds for frontend polling
+// ---------------------------------------------------------------------------
+
+export interface DecomposerProgress {
+  stage: string;      // Current stage name (e.g. "识别产品模块")
+  round: number;       // Completed rounds (0-4)
+  totalRounds: number; // Always 4
+  message: string;     // Human-readable status message
+}
