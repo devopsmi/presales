@@ -12,6 +12,7 @@ import { VENDOR_NAME } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { EstimatorOutput } from "@/lib/agent/state";
 import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
+import { getSessionConfig } from "@/lib/session-config";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "estimator" });
@@ -115,6 +116,7 @@ function buildUserPrompt(input: {
 
 export async function runEstimator(
   model: BaseChatModel,
+  sessionId: string,
   input: {
     rows: QuotationRow[];
     selectedTrades: TradeRole[];
@@ -132,7 +134,9 @@ export async function runEstimator(
     return { rows: [], header, quotationJson: JSON.stringify({ header, rows: [], summary: {} }) };
   }
 
-  const planContent = loadPlan(input.estimationPlanId);
+  const overrides = getSessionConfig(sessionId)?.promptOverrides;
+  const planKey = "plan_" + input.estimationPlanId.replace(/-/g, "_");
+  const planContent = overrides?.[planKey]?.trim() || loadPlan(input.estimationPlanId);
   const systemPrompt = buildSystemPrompt(planContent, input.selectedTrades);
   const userPrompt = buildUserPrompt(input);
 

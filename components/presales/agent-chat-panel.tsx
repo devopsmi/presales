@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useCallback, useRef, useState } from "react";
+import { FileText } from "lucide-react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { MessageList } from "@/components/agent-elements/message-list";
@@ -14,10 +15,12 @@ import { VendorNameInput } from "./vendor-name-input";
 import { EstimationPlanPicker } from "./estimation-plan-picker";
 import { DecomposerProgressCard } from "./decomposer-progress-card";
 import { FileParserCard, GrillMeCard, EstimatorCard } from "./presales-tool-cards";
+import { PromptEditorDialog } from "./prompt-editor-dialog";
 import { usePresales } from "@/lib/presales-context";
 import { serializeFiles } from "@/lib/file-utils";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { TradeRole } from "@/lib/constants";
+import { Button } from "@/components/ui/button";
 
 interface QuotationExtract {
   header: QuotationHeader;
@@ -44,7 +47,7 @@ function extractFileParserOutput(
     if (output && Array.isArray((output as any).parsedFiles)) {
       return (output as any).parsedFiles as ParsedFileEntry[];
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -84,7 +87,7 @@ function extractQuotationFromToolPart(
         : deriveTradesFromRows(data.rows);
       return { header: data.header, rows: data.rows, trades };
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -132,6 +135,7 @@ export function AgentChatPanel() {
   }, [attachments]);
 
   const [isDragOver, setIsDragOver] = useState(false);
+  const [promptEditorOpen, setPromptEditorOpen] = useState(false);
 
   // Guards: prevent repeated JSON.parse + message scanning on every SSE delta.
   // Reset when a new user message is sent (handleSend).
@@ -312,9 +316,19 @@ export function AgentChatPanel() {
             <VendorNameInput />
             <ModelPicker />
             <EstimationPlanPicker />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setPromptEditorOpen(true)}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <FileText className="h-4 w-4 mr-1" />
+              提示词
+            </Button>
           </div>
         }
       />
+      <PromptEditorDialog open={promptEditorOpen} onOpenChange={setPromptEditorOpen} />
     </div>
   );
 }

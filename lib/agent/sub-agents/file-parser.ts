@@ -17,6 +17,8 @@ import { z } from "zod";
 import type { StoredFile } from "@/lib/agent/state";
 import { parsePdf, parseWord, parseExcel, lookAtImage } from "@/lib/agent/tools/file-parser";
 import { createModelLoggingMiddleware } from "@/lib/agent/llm";
+import { getSessionConfig } from "@/lib/session-config";
+import { resolvePrompt } from "@/lib/prompt-defaults";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "file_parser" });
@@ -201,11 +203,15 @@ function buildWriteParsedTool(files: StoredFile[]) {
 
 export async function runFileParser(
   model: BaseChatModel,
+  sessionId: string,
   fileStore: Map<number, StoredFile>,
 ): Promise<{ parsedCount: number }> {
   const files = Array.from(fileStore.values());
   const unparsedCount = files.filter((f) => !f.parsed).length;
   logger.info("file_parser start", { totalFiles: files.length, unparsed: unparsedCount });
+
+  const overrides = getSessionConfig(sessionId)?.promptOverrides;
+  const effectiveSystemPrompt = resolvePrompt("file_parser", overrides) || SYSTEM_PROMPT;
 
   const tools = [
     buildReadFileTool(files),
@@ -214,7 +220,7 @@ export async function runFileParser(
 
   const agent = createAgent({
     model,
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: effectiveSystemPrompt,
     tools,
     middleware: [createModelLoggingMiddleware("file_parser")],
   });

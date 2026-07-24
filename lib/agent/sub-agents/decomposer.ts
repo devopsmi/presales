@@ -15,6 +15,8 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import type { QuotationRow } from "@/lib/types";
 import type { DecomposerOutput } from "@/lib/agent/state";
 import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
+import { getSessionConfig } from "@/lib/session-config";
+import { resolvePrompt } from "@/lib/prompt-defaults";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "decomposer" });
@@ -523,6 +525,7 @@ function buildR4Prompt(
 
 export async function runDecomposer(
   model: BaseChatModel,
+  sessionId: string,
   input: { structuredBrief: string },
   onProgress?: (progress: DecomposerProgress) => void,
 ): Promise<DecomposerOutput> {
@@ -533,12 +536,18 @@ export async function runDecomposer(
 
   logger.info("decomposer start (BFS)", { briefLen: brief.length });
 
+  const overrides = getSessionConfig(sessionId)?.promptOverrides;
+  const r1Prompt = resolvePrompt("decomposer_r1", overrides) || R1_MODULE_PROMPT;
+  const r2Prompt = resolvePrompt("decomposer_r2", overrides) || R2_SUB_MODULE_PROMPT;
+  const r3Prompt = resolvePrompt("decomposer_r3", overrides) || R3_FUNCTION_PROMPT;
+  const r4Prompt = resolvePrompt("decomposer_r4", overrides) || R4_LEAF_PROMPT;
+
   // ── Round 1: Modules (flat string array) ──
   onProgress?.({ stage: "识别产品模块", round: 0, totalRounds: 4, message: "正在分析产品模块划分..." });
   const r1Raw = await invokeAndExtractJson(
     model,
     "decomposer_r1",
-    R1_MODULE_PROMPT,
+    r1Prompt,
     `项目简报：\n\n${brief}\n\n请列出所有一级模块。输出格式：["模块A", "模块B"]`,
   );
   const modules = parseModules(r1Raw);
@@ -549,7 +558,7 @@ export async function runDecomposer(
   const r2Raw = await invokeAndExtractJson(
     model,
     "decomposer_r2",
-    R2_SUB_MODULE_PROMPT,
+    r2Prompt,
     buildR2Prompt(modules, brief),
   );
   const r2Pairs = parseSubModules(r2Raw, modules);
@@ -561,7 +570,7 @@ export async function runDecomposer(
   const r3Raw = await invokeAndExtractJson(
     model,
     "decomposer_r3",
-    R3_FUNCTION_PROMPT,
+    r3Prompt,
     buildR3Prompt(r2Pairs, brief),
   );
   const r3Pairs = parseFunctions(r3Raw, r2Pairs);
@@ -572,7 +581,7 @@ export async function runDecomposer(
   const r4Raw = await invokeAndExtractJson(
     model,
     "decomposer_r4",
-    R4_LEAF_PROMPT,
+    r4Prompt,
     buildR4Prompt(r3Pairs, r2Pairs, brief),
   );
   const r4Triples = parseLeaves(r4Raw, r3Pairs);

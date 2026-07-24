@@ -258,7 +258,7 @@ function buildParseFilesTool(model: BaseChatModel) {
       const sessionId = getSessionId(config);
       const cache = getOrCreateSessionCache(sessionId);
       logger.info("parse_files called", { sessionId });
-      await runFileParser(model, cache.fileStore);
+      await runFileParser(model, sessionId, cache.fileStore);
 
       cache.stage = "parsed";
 
@@ -359,6 +359,7 @@ function buildDecomposeTool(model: BaseChatModel) {
 
       const result = await runDecomposer(
         model,
+        sessionId,
         { structuredBrief: cache.structuredBrief },
         (progress) => {
           cache.decomposerProgress = progress;
@@ -399,7 +400,7 @@ function buildEstimateHoursTool(model: BaseChatModel) {
 
       logger.info("estimate_hours called", { sessionId, rowCount: cache.rows.length });
 
-      const result = await runEstimator(model, {
+      const result = await runEstimator(model, sessionId, {
         rows: cache.rows,
         selectedTrades: sessionConfig.trades,
         estimationPlanId: sessionConfig.estimationPlanId,
@@ -445,7 +446,9 @@ function buildGrillMeTool(model: BaseChatModel) {
       }
 
       logger.info("grill_me called", { sessionId, hasBrief: !!cache.structuredBrief, hasContext: !!context });
-      const skillContent = loadSkillContent("grill-me");
+      const sessionConfig = getSessionConfig(sessionId);
+      const overrideGrillMe = sessionConfig.promptOverrides?.grill_me;
+      const skillContent = overrideGrillMe?.trim() || loadSkillContent("grill-me");
 
       const grillAgent = createAgent({
         model,

@@ -26,6 +26,7 @@ export interface SessionConfig {
   vendorName: string;
   estimationPlanId: string;
   quotedRates: QuotedRates;
+  promptOverrides?: Record<string, string>;
 }
 
 function defaultRates(): QuotedRates {
@@ -40,6 +41,7 @@ const DEFAULT_CONFIG: SessionConfig = {
   vendorName: VENDOR_NAME,
   estimationPlanId: "expert-judgment-plan",
   quotedRates: defaultRates(),
+  promptOverrides: {},
 };
 
 const store = new Map<string, SessionConfig>();
@@ -61,6 +63,7 @@ export function updateSessionConfig(
       vendorName: patch.vendorName ?? current.vendorName,
       estimationPlanId: patch.estimationPlanId ?? current.estimationPlanId,
       quotedRates: patch.quotedRates ?? current.quotedRates,
+      promptOverrides: patch.promptOverrides ?? current.promptOverrides,
     };
   store.set(sessionId, updated);
   return updated;

@@ -31,7 +31,7 @@ function loadSessionId(): string {
 
 async function syncConfigToBackend(
   sessionId: string,
-  config: { trades: TradeRole[]; budgetRange: [number, number]; model: string; models: ModelConfig[]; vendorName: string; estimationPlanId: string; quotedRates: QuotedRates },
+  config: { trades: TradeRole[]; budgetRange: [number, number]; model: string; models: ModelConfig[]; vendorName: string; estimationPlanId: string; quotedRates: QuotedRates; promptOverrides: Record<string, string> },
 ): Promise<void> {
   try {
     await fetch("/api/config", {
@@ -46,6 +46,7 @@ async function syncConfigToBackend(
         vendorName: config.vendorName,
         estimationPlanId: config.estimationPlanId,
         quotedRates: config.quotedRates,
+        promptOverrides: config.promptOverrides,
       }),
     });
   } catch {
@@ -70,6 +71,7 @@ interface PresalesState {
   quotedRates: QuotedRates;
   fileTabs: FileTab[];
   activeRightTab: string;
+  promptOverrides: Record<string, string>;
 }
 
 interface PresalesContextValue extends PresalesState {
@@ -95,6 +97,7 @@ interface PresalesContextValue extends PresalesState {
   setActiveRightTab: (tabId: string) => void;
   closeFileTab: (tabId: string) => void;
   setFileParsedContent: (fileName: string, parsed: string) => void;
+  setPromptOverrides: (overrides: Record<string, string>) => void;
 }
 
 const STORAGE_KEY = "presales-preferences";
@@ -116,6 +119,7 @@ function loadPreferences(): Partial<PresalesState> {
         vendorName: parsed.vendorName ?? undefined,
         estimationPlanId: parsed.estimationPlanId ?? undefined,
         quotedRates: parsed.quotedRates ?? undefined,
+        promptOverrides: parsed.promptOverrides ?? undefined,
       };
     }
   } catch {
@@ -136,6 +140,7 @@ function savePreferences(state: PresalesState): void {
       vendorName: state.vendorName,
       estimationPlanId: state.estimationPlanId,
       quotedRates: state.quotedRates,
+      promptOverrides: state.promptOverrides,
     }));
   } catch {
     // Ignore quota errors
@@ -159,6 +164,7 @@ const defaults: PresalesState = {
   quotedRates: { ...TRADE_DAILY_RATES },
   fileTabs: [],
   activeRightTab: "quotation",
+  promptOverrides: {},
 };
 
 export function PresalesProvider({ children }: { children: ReactNode }) {
@@ -193,6 +199,9 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
   );
   const [quotedRates, setQuotedRates] = useState<QuotedRates>(
     prefs.quotedRates ?? defaults.quotedRates
+  );
+  const [promptOverrides, setPromptOverridesRaw] = useState<Record<string, string>>(
+    prefs.promptOverrides ?? defaults.promptOverrides
   );
   const [fileTabs, setFileTabs] = useState<FileTab[]>(defaults.fileTabs);
   const [activeRightTab, setActiveRightTab] = useState<string>(defaults.activeRightTab);
@@ -235,6 +244,10 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
   const closeFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => prev.filter((t) => t.id !== tabId));
     setActiveRightTab((prev) => (prev === tabId ? "quotation" : prev));
+  }, []);
+
+  const setPromptOverrides = useCallback((overrides: Record<string, string>) => {
+    setPromptOverridesRaw(overrides);
   }, []);
 
   const setFileParsedContent = useCallback((fileName: string, parsed: string) => {
@@ -284,8 +297,9 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
       vendorName,
       estimationPlanId,
       quotedRates,
+      promptOverrides,
     });
-  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId, quotedRates]);
+  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId, quotedRates, promptOverrides]);
 
   // Sync config to backend on changes (skip initial mount)
   useEffect(() => {
@@ -301,28 +315,29 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
       vendorName,
       estimationPlanId,
       quotedRates,
+      promptOverrides,
     });
-  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId, quotedRates]);
+  }, [sessionId, selectedTrades, budgetRange, modelProvider, customModels, vendorName, estimationPlanId, quotedRates, promptOverrides]);
 
   // Persist preferences on change
   const currentState: PresalesState = {
     selectedTrades, industry, budgetRange, modelProvider, customModels,
     attachments, quotation, header, sessionId, quotationTrades, vendorName,
-    estimationPlanId, quotedRates, uploadError, fileTabs, activeRightTab,
+    estimationPlanId, quotedRates, uploadError, fileTabs, activeRightTab, promptOverrides,
   };
 
   useEffect(() => {
     savePreferences(currentState);
-  }, [selectedTrades, industry, budgetRange, modelProvider, customModels, estimationPlanId, quotedRates]);
+  }, [selectedTrades, industry, budgetRange, modelProvider, customModels, estimationPlanId, quotedRates, promptOverrides]);
 
   const value: PresalesContextValue = {
     selectedTrades, industry, budgetRange, modelProvider, customModels, attachments,
     quotation, header, sessionId, quotationTrades, vendorName, estimationPlanId, quotedRates,
-    fileTabs, activeRightTab,
+    fileTabs, activeRightTab, promptOverrides,
     setSelectedTrades, setIndustry, setBudgetRange, setModelProvider, setCustomModels,
     setAttachments, addAttachments, removeAttachment, uploadError, setUploadError,
     setQuotation, setHeader, setQuotationTrades, setQuotationResult, setVendorName, setEstimationPlanId, setQuotedRates, syncConfig, reset,
-    setActiveRightTab, closeFileTab, setFileParsedContent,
+    setActiveRightTab, closeFileTab, setFileParsedContent, setPromptOverrides,
   };
 
   return (

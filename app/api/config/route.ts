@@ -15,6 +15,7 @@ interface ConfigRequest {
   vendorName?: string;
   estimationPlanId?: string;
   quotedRates?: QuotedRates;
+  promptOverrides?: Record<string, string>;
 }
 
 export async function POST(req: Request) {
@@ -36,6 +37,7 @@ export async function POST(req: Request) {
       vendorName: body.vendorName,
       estimationPlanId: body.estimationPlanId,
       quotedRates: body.quotedRates,
+      promptOverrides: body.promptOverrides,
     });
 
     log.info("Session config updated", {
