@@ -96,22 +96,32 @@ function buildUserPrompt(input: {
   selectedTrades: TradeRole[];
   customerName: string;
   projectName: string;
+  instructions?: string;
 }): string {
   const tradeNames = input.selectedTrades.join("、");
   const items = input.rows
     .map((r) => `${r.seq}: ${r.description}`)
     .join("\n");
 
-  return [
+  const parts = [
     `客户选择的工种：${tradeNames}`,
     `客户名称：${input.customerName || "未指定"}`,
     `项目名称：${input.projectName || "未指定"}`,
+  ];
+
+  if (input.instructions) {
+    parts.push("", `⚠️ 修改指令: ${input.instructions}`);
+  }
+
+  parts.push(
     "",
     `功能清单（共 ${input.rows.length} 项，每行为 seq: 功能描述）：`,
     items,
     "",
     `请为每项输出 {"seq号": {"工种": 人天}} 的紧凑 JSON 对象。`,
-  ].join("\n");
+  );
+
+  return parts.join("\n");
 }
 
 export async function runEstimator(
@@ -125,9 +135,14 @@ export async function runEstimator(
     projectName: string;
     vendorName?: string;
     budgetRange: [number, number];
+    instructions?: string;
   },
 ): Promise<EstimatorOutput> {
-  logger.info("estimator start", { rowCount: input.rows.length, selectedTrades: input.selectedTrades });
+  logger.info("estimator start", {
+    rowCount: input.rows.length,
+    selectedTrades: input.selectedTrades,
+    hasInstructions: !!input.instructions,
+  });
 
   if (!input.rows.length) {
     const header = buildHeader(input);
@@ -138,7 +153,13 @@ export async function runEstimator(
   const planKey = "plan_" + input.estimationPlanId.replace(/-/g, "_");
   const planContent = overrides?.[planKey]?.trim() || loadPlan(input.estimationPlanId);
   const systemPrompt = buildSystemPrompt(planContent, input.selectedTrades);
-  const userPrompt = buildUserPrompt(input);
+  const userPrompt = buildUserPrompt({
+    rows: input.rows,
+    selectedTrades: input.selectedTrades,
+    customerName: input.customerName,
+    projectName: input.projectName,
+    instructions: input.instructions,
+  });
 
   const agent = createAgent({
     model,

@@ -2,26 +2,20 @@
 
 import { Wrench } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { usePresales } from "@/lib/presales-context";
-import { INDUSTRIES, TRADES, TRADE_DAILY_RATES, INDUSTRY_DEFAULTS, type TradeRole, type Industry } from "@/lib/constants";
+import { TRADES, TRADE_DAILY_RATES, type TradeRole } from "@/lib/constants";
 import type { QuotedRates } from "@/lib/types";
 import { useState, useCallback } from "react";
 
 export function TradeSelector() {
-  const { selectedTrades, industry, quotedRates, setSelectedTrades, setIndustry, setQuotedRates } = usePresales();
+  const { selectedTrades, quotedRates, setSelectedTrades, setQuotedRates } = usePresales();
   const [open, setOpen] = useState(false);
   const [tempTrades, setTempTrades] = useState<TradeRole[]>(selectedTrades);
   const [tempRates, setTempRates] = useState<QuotedRates>(quotedRates);
-
-  function handleIndustryChange(ind: string) {
-    setIndustry(ind as Industry);
-    setTempTrades([...INDUSTRY_DEFAULTS[ind as Industry]]);
-  }
 
   function toggleTrade(role: TradeRole) {
     setTempTrades((prev) => {
@@ -59,14 +53,11 @@ export function TradeSelector() {
   }
 
   function handleReset() {
-    setTempTrades([...INDUSTRY_DEFAULTS[industry]]);
+    setTempTrades(TRADES.map((t) => t.id));
     setTempRates({ ...TRADE_DAILY_RATES });
   }
 
   const count = selectedTrades.length;
-
-  const rateFor = (role: TradeRole): number =>
-    quotedRates[role] ?? TRADE_DAILY_RATES[role];
 
   return (
     <Popover open={open} onOpenChange={(o) => { setOpen(o); if (o) { setTempTrades([...selectedTrades]); setTempRates({ ...quotedRates }); } }}>
@@ -78,25 +69,12 @@ export function TradeSelector() {
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-96 p-0" align="start" onClick={(e) => e.stopPropagation()}>
-        <div className="p-3 pb-0">
-          <p className="text-sm font-medium mb-2">选择行业</p>
-          <Tabs value={industry} onValueChange={handleIndustryChange}>
-            <TabsList className="w-full flex flex-wrap h-auto gap-1 bg-transparent">
-              {INDUSTRIES.map((ind) => (
-                <TabsTrigger key={ind} value={ind} className="text-xs px-2 py-1 h-7">
-                  {ind}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-        </div>
-        <Separator className="my-2" />
-        <div className="px-3 pb-1">
+        <div className="px-3 pt-3 pb-1">
           <p className="text-sm font-medium mb-2">选择工种与报价单价</p>
           <div className="space-y-1.5 max-h-60 overflow-y-auto">
             {TRADES.map((trade) => {
               const checked = tempTrades.includes(trade.id);
-              const rate = tempRates[trade.id] ?? TRADE_DAILY_RATES[trade.id];
+              const rate = tempRates[trade.id];
               return (
                 <label key={trade.id} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-accent rounded px-1">
                   <Checkbox
@@ -108,9 +86,10 @@ export function TradeSelector() {
                     <span className="text-xs text-muted-foreground shrink-0">¥</span>
                     <Input
                       className="h-7 w-20 text-xs px-1.5"
-                      value={checked ? String(rate) : ""}
+                      value={checked && rate !== undefined ? String(rate) : ""}
                       disabled={!checked}
                       onChange={(e) => handleRateChange(trade.id, e.target.value)}
+                      placeholder={checked ? String(TRADE_DAILY_RATES[trade.id]) : undefined}
                       onBlur={() => {
                         if (checked && (!tempRates[trade.id] || tempRates[trade.id]! <= 0)) {
                           setTempRates((prev) => ({ ...prev, [trade.id]: TRADE_DAILY_RATES[trade.id] }));

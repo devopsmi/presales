@@ -80,6 +80,33 @@ async function invokeAndExtractJson(
 }
 
 // ===========================================================================
+// invokeRoundWithContext — injects instructions + previous rows into user prompt
+// ===========================================================================
+
+async function invokeRoundWithContext(
+  model: BaseChatModel,
+  agentName: string,
+  systemPrompt: string,
+  userPrompt: string,
+  instructions?: string,
+  previousRowsContext?: string,
+): Promise<unknown> {
+  const contextParts: string[] = [];
+  if (instructions) {
+    contextParts.push(`⚠️ 修改指令: ${instructions}\n请只修改指令指定的部分，其他部分保持与参考结构一致。`);
+  }
+  if (previousRowsContext) {
+    contextParts.push(previousRowsContext);
+  }
+
+  const fullUserPrompt = contextParts.length > 0
+    ? contextParts.join("\n\n") + "\n\n---\n\n" + userPrompt
+    : userPrompt;
+
+  return invokeAndExtractJson(model, agentName, systemPrompt, fullUserPrompt);
+}
+
+// ===========================================================================
 // Layer prompts — each focuses the LLM on a SINGLE hierarchy level
 // ===========================================================================
 
@@ -520,13 +547,55 @@ function buildR4Prompt(
 }
 
 // ===========================================================================
+// formatPreviousRows — reconstructs hierarchy tree from QuotationRow[] for LLM reference
+// ===========================================================================
+
+function formatPreviousRows(rows: QuotationRow[]): string {
+  if (!rows.length) return "";
+
+  const moduleMap = new Map<string, Map<string, Map<string, [string, string][]>>>();
+  for (const r of rows) {
+    if (!moduleMap.has(r.module)) moduleMap.set(r.module, new Map());
+    const subMap = moduleMap.get(r.module)!;
+    if (!subMap.has(r.sub_module)) subMap.set(r.sub_module, new Map());
+    const funcMap = subMap.get(r.sub_module)!;
+    if (!funcMap.has(r.function)) funcMap.set(r.function, []);
+    funcMap.get(r.function)!.push([r.sub_function, r.description]);
+  }
+
+  const lines: string[] = [];
+  lines.push(`## 参考：上一次拆解结果（共 ${rows.length} 个叶子行）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+
+  for (const [module, subMap] of moduleMap) {
+    lines.push(`### ${module}`);
+    for (const [sub, funcMap] of subMap) {
+      lines.push(`  - ${sub}`);
+      for (const [func, leaves] of funcMap) {
+        lines.push(`    - ${func}`);
+        for (const [subFunc, desc] of leaves) {
+          lines.push(`      - ${subFunc}: ${desc}`);
+        }
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// ===========================================================================
 // BFS orchestrator — 4 rounds, each focusing on one hierarchy level
 // ===========================================================================
 
 export async function runDecomposer(
   model: BaseChatModel,
   sessionId: string,
-  input: { structuredBrief: string },
+  input: {
+    structuredBrief: string;
+    instructions?: string;
+    previousRows?: QuotationRow[];
+  },
   onProgress?: (progress: DecomposerProgress) => void,
 ): Promise<DecomposerOutput> {
   const brief = input.structuredBrief;
@@ -534,7 +603,16 @@ export async function runDecomposer(
     throw new Error("Decomposer: structuredBrief is empty");
   }
 
-  logger.info("decomposer start (BFS)", { briefLen: brief.length });
+  const instructions = input.instructions;
+  const previousRowsContext = input.previousRows?.length
+    ? formatPreviousRows(input.previousRows)
+    : undefined;
+
+  logger.info("decomposer start (BFS)", {
+    briefLen: brief.length,
+    hasInstructions: !!instructions,
+    hasPreviousRows: !!previousRowsContext,
+  });
 
   const overrides = getSessionConfig(sessionId)?.promptOverrides;
   const r1Prompt = resolvePrompt("decomposer_r1", overrides) || R1_MODULE_PROMPT;
@@ -544,22 +622,26 @@ export async function runDecomposer(
 
   // ── Round 1: Modules (flat string array) ──
   onProgress?.({ stage: "识别产品模块", round: 0, totalRounds: 4, message: "正在分析产品模块划分..." });
-  const r1Raw = await invokeAndExtractJson(
+  const r1Raw = await invokeRoundWithContext(
     model,
     "decomposer_r1",
     r1Prompt,
     `项目简报：\n\n${brief}\n\n请列出所有一级模块。输出格式：["模块A", "模块B"]`,
+    instructions,
+    previousRowsContext,
   );
   const modules = parseModules(r1Raw);
   onProgress?.({ stage: "识别产品模块", round: 1, totalRounds: 4, message: `已识别 ${modules.length} 个模块` });
 
   // ── Round 2: Sub-Modules ({module → [sub_modules]}) ──
   onProgress?.({ stage: "拆解子模块", round: 1, totalRounds: 4, message: "正在拆解子模块..." });
-  const r2Raw = await invokeAndExtractJson(
+  const r2Raw = await invokeRoundWithContext(
     model,
     "decomposer_r2",
     r2Prompt,
     buildR2Prompt(modules, brief),
+    instructions,
+    previousRowsContext,
   );
   const r2Pairs = parseSubModules(r2Raw, modules);
   const subModules = r2Pairs;
@@ -567,22 +649,26 @@ export async function runDecomposer(
 
   // ── Round 3: Functions ({sub_module → [functions]}) ──
   onProgress?.({ stage: "识别功能点", round: 2, totalRounds: 4, message: "正在识别功能点..." });
-  const r3Raw = await invokeAndExtractJson(
+  const r3Raw = await invokeRoundWithContext(
     model,
     "decomposer_r3",
     r3Prompt,
     buildR3Prompt(r2Pairs, brief),
+    instructions,
+    previousRowsContext,
   );
   const r3Pairs = parseFunctions(r3Raw, r2Pairs);
   onProgress?.({ stage: "识别功能点", round: 3, totalRounds: 4, message: `已识别 ${r3Pairs.length} 个功能点` });
 
   // ── Round 4: Leaves ({function → {sub_function: description}}) ──
   onProgress?.({ stage: "生成子功能详情", round: 3, totalRounds: 4, message: "正在生成子功能详情..." });
-  const r4Raw = await invokeAndExtractJson(
+  const r4Raw = await invokeRoundWithContext(
     model,
     "decomposer_r4",
     r4Prompt,
     buildR4Prompt(r3Pairs, r2Pairs, brief),
+    instructions,
+    previousRowsContext,
   );
   const r4Triples = parseLeaves(r4Raw, r3Pairs);
   onProgress?.({ stage: "生成子功能详情", round: 4, totalRounds: 4, message: `已生成 ${r4Triples.length} 个子功能` });

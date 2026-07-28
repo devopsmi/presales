@@ -246,7 +246,25 @@ const MAIN_SYSTEM_PROMPT = `你是售前方案主管 Agent，负责与客户沟�
 
 ## 核心原则
 - demand-driven: 只在需要时解析文件、只在信息不足时追问
-- 最终报价以 estimate_hours 的输出为准`;
+- 最终报价以 estimate_hours 的输出为准
+
+## 用户反馈处理（灵活修改）
+当用户对已有结果提出修改意见时，判断影响范围后选择性重走管线，而非每次都全量重建：
+
+### 影响范围判定
+- **仅涉及工时**（如"前端估低了"、"整体加20%"、"backend减半"）→ 只调用 estimate_hours(instructions="用户的具体要求")，不重走前面步骤
+- **仅涉及拆解**（如"粒度太粗"、"把某模块拆开"、"调整子功能描述"、"合并相似功能"）→ 调用 decompose(instructions="用户的具体要求")，完成后必须自动调用 estimate_hours()
+- **涉及需求变更**（如"再加一个XX功能"、"需求理解错了"、"删除YY模块"）→ 调用 write_brief(更新后的完整简报)，然后依次调用 decompose() → estimate_hours()
+
+### 指令传递
+- 调用 decompose/estimate_hours 时，必须将用户的具体修改要求原样或精炼后写入 instructions 参数
+- instructions 必须具体明确，不可泛泛而谈。正确示例："前端工时整体增加20%"、"每个模块至少拆5个子模块"；错误示例："改一下"
+- 若不涉及修改（首次或全量重建），不传 instructions
+
+### 一致性保证
+- 调了 decompose 后必须随后调 estimate_hours
+- 调了 write_brief 后必须随后依次调 decompose 和 estimate_hours
+- 修改完成后简要说明变更内容`;
 
 // ---------------------------------------------------------------------------
 // Tool builders — all resolve session via config.configurable.thread_id
@@ -343,7 +361,7 @@ function buildWriteBriefTool() {
 
 function buildDecomposeTool(model: BaseChatModel) {
   return tool(
-    async (_input: {}, config?: RunnableConfig) => {
+    async ({ instructions }: { instructions?: string }, config?: RunnableConfig) => {
       const sessionId = getSessionId(config);
       const cache = getOrCreateSessionCache(sessionId);
 
@@ -352,7 +370,7 @@ function buildDecomposeTool(model: BaseChatModel) {
         return JSON.stringify({ status: "error", message: "请先汇总需求简报（调用 write_brief）" });
       }
 
-      logger.info("decompose called", { sessionId });
+      logger.info("decompose called", { sessionId, hasInstructions: !!instructions });
 
       // Clear stale progress before starting
       cache.decomposerProgress = null;
@@ -360,7 +378,11 @@ function buildDecomposeTool(model: BaseChatModel) {
       const result = await runDecomposer(
         model,
         sessionId,
-        { structuredBrief: cache.structuredBrief },
+        {
+          structuredBrief: cache.structuredBrief,
+          instructions,
+          previousRows: cache.rows.length > 0 ? cache.rows : undefined,
+        },
         (progress) => {
           cache.decomposerProgress = progress;
         },
@@ -377,28 +399,35 @@ function buildDecomposeTool(model: BaseChatModel) {
     },
     {
       name: "decompose",
-      description: "将需求简报拆解为五级功能清单。必须在 parse_files 后调用。无需参数。",
-      schema: z.object({}),
+      description: "将需求简报拆解为五级功能清单。必须在 write_brief 后调用。可传入 instructions 做定向修改（如粒度调整、模块重组），不传则为全新拆解。",
+      schema: z.object({
+        instructions: z.string().optional().describe("修改指令。如'粒度更细，每个模块至少5个子模块'、'把模块A拆成用户端和管理端'。不传则全量拆解。"),
+      }),
     },
   );
 }
 
 function buildEstimateHoursTool(model: BaseChatModel) {
   return tool(
-    async (_input: {}, config?: RunnableConfig) => {
+    async ({ instructions }: { instructions?: string }, config?: RunnableConfig) => {
       const sessionId = getSessionId(config);
       const cache = getOrCreateSessionCache(sessionId);
       const sessionConfig = getSessionConfig(sessionId);
 
-      // Inline stage validation
-      if (cache.stage !== "decomposed") {
-        return JSON.stringify({ status: "error", message: "请先完成功能拆解（调用 decompose）" });
+      // Inline stage validation: require rows to exist, but allow re-estimation at any stage
+      if (!cache.structuredBrief) {
+        return JSON.stringify({ status: "error", message: "请先完成需求简报" });
       }
       if (!cache.rows.length) {
-        return JSON.stringify({ status: "error", message: "功能清单为空" });
+        return JSON.stringify({ status: "error", message: "功能清单为空，请先完成功能拆解（调用 decompose）" });
       }
 
-      logger.info("estimate_hours called", { sessionId, rowCount: cache.rows.length });
+      const isModification = !!instructions;
+      logger.info("estimate_hours called", {
+        sessionId,
+        rowCount: cache.rows.length,
+        isModification,
+      });
 
       const result = await runEstimator(model, sessionId, {
         rows: cache.rows,
@@ -408,6 +437,7 @@ function buildEstimateHoursTool(model: BaseChatModel) {
         projectName: cache.projectName,
         vendorName: sessionConfig.vendorName,
         budgetRange: sessionConfig.budgetRange,
+        instructions,
       });
 
       cache.stage = "estimated";
@@ -425,8 +455,10 @@ function buildEstimateHoursTool(model: BaseChatModel) {
     },
     {
       name: "estimate_hours",
-      description: "为功能清单估算各工种人天并自动计算报价。必须在 decompose 后调用。无需参数。",
-      schema: z.object({}),
+      description: "为功能清单估算各工种人天并自动计算报价。必须在 decompose 后调用。可传入 instructions 做定向修改（如工时调整），不传则为全新估算。",
+      schema: z.object({
+        instructions: z.string().optional().describe("修改指令。如'前端工时整体增加50%'、'只重估seq 5-10的行'、'backend减半'。不传则全量估算。"),
+      }),
     },
   );
 }

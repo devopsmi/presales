@@ -5,6 +5,7 @@ export const TRADES = [
   { id: "design", label: "UI 设计", dailyRate: 2000, icon: "Palette" },
   { id: "testing", label: "测试", dailyRate: 1800, icon: "Bug" },
   { id: "pm", label: "项目管理", dailyRate: 3000, icon: "Users" },
+  { id: "product-manager", label: "产品经理", dailyRate: 3500, icon: "ClipboardList" },
   { id: "devops", label: "DevOps", dailyRate: 2800, icon: "Cloud" },
   { id: "data", label: "数据分析", dailyRate: 3000, icon: "BarChart3" },
   { id: "ai", label: "AI/算法", dailyRate: 4000, icon: "Cpu" },
