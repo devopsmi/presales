@@ -107,164 +107,42 @@ async function invokeRoundWithContext(
 }
 
 // ===========================================================================
-// Layer prompts — each focuses the LLM on a SINGLE hierarchy level
+// invokeRoundWithRetry — retries LLM call once on parse failure
 // ===========================================================================
 
-const R1_MODULE_PROMPT = `你是资深系统架构师。根据项目需求简报，识别所有一级模块。
+async function invokeRoundWithRetry<T>(
+  model: BaseChatModel,
+  agentName: string,
+  systemPrompt: string,
+  baseUserPrompt: string,
+  parseFn: (raw: unknown) => T,
+  instructions?: string,
+  previousRowsContext?: string,
+): Promise<T> {
+  let userPrompt = baseUserPrompt;
 
-## 拆解维度（必须先锁定）
-全程以业务价值维度为主线：模块和子模块按业务域划分，技术实现下沉到子功能描述中，不占用拆解层级。
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const raw = await invokeRoundWithContext(
+        model, agentName, systemPrompt, userPrompt,
+        attempt === 0 ? instructions : undefined,
+        attempt === 0 ? previousRowsContext : undefined,
+      );
+      return parseFn(raw);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
 
-## 模块的定义
-模块是一级业务域，是最高层级的独立闭环单元。每个模块对应一个完整的业务目标，具备以下特征：
-- 可独立对外提供服务，模块间低耦合，通过接口/流程交互
-- 对应独立的业务负责人/研发团队，可独立迭代、独立上线
-- 模块内业务高度内聚，和其他模块边界清晰
+      if (attempt === 0) {
+        logger.warn(`${agentName} attempt 1 failed, retrying`, { error: errMsg });
+        userPrompt = `${baseUserPrompt}\n\n⚠️ 上一次输出校验失败：${errMsg}\n请修正后重新输出。`;
+      } else {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    }
+  }
 
-## 粒度控制标准
-### 合格信号
-- 用一句话可清晰描述该模块职责，不出现"和""以及"等并列词
-- 模块数量通常在 3-8 个
-
-### 过粗信号（需要拆分）
-- 一个模块覆盖多个不相关的业务域（如"商品+订单+用户"合并为一个模块）
-
-### 过细信号（需要合并）
-- 把单个功能定义为模块
-
-## 输出格式
-纯 JSON 字符串数组：
-["模块名", "模块名", ...]
-
-## 规则
-- 必须包含"系统设计"模块
-- 模块命名简洁明了（如"用户中心"、"管理后台"、"数据大屏"）
-- 模块数量根据项目规模确定，通常 3-8 个
-- 只输出 JSON 数组，不要其他内容`;
-
-const R2_SUB_MODULE_PROMPT = `你是功能分析师。根据项目简报和已确定的模块，为每个模块拆解子模块。
-
-## 拆解逻辑：向上聚合
-子模块不是从模块"拆分"出来的，而是将功能向上聚合而成的容器。在模块内部，把业务高度相关的功能归为一个子模块。每个子模块是同方向功能的集合，对应小组级的责任边界。
-
-## 子模块的定义与粒度标准
-### 是什么
-子模块是用户在产品中导航到的独立区域——一个页面、一个面板、一个入口。它们是"去哪里"，不是"做什么"。
-
-### 粒度合格标准
-- 只负责模块内单一业务方向，职责不跨领域
-- 用一句话可清晰描述职责（不含"和""以及"）
-- 每个模块拆 2-5 个子模块
-
-### 过粗信号（需要拆分）
-- 一个模块只拆出 1-2 个子模块，或子模块间业务重叠度高
-
-### 过细信号（需要合并）
-- 把单个功能点（如"密码找回"）定义为子模块
-
----
-
-**业务模块的子模块**：独立页面或功能区域。用户能从导航直接到达 → 是子模块；用户在同一页面内完成的若干操作 → 不是子模块，是功能（留给下一层）。
-
-好的拆分（模块"管理后台"）：
-  "仪表盘"、"用户管理"、"内容管理"、"系统设置"、"操作日志"
-
-**设计模块的子模块**：技术架构相关的独立关注面。
-
-好的拆分（模块"系统设计"）：
-  "技术架构设计"、"数据模型设计"、"UI设计体系"、"部署与运维方案"
-
-## 输出格式（紧凑映射）
-纯 JSON 对象，key 为模块名，value 为该模块的子模块数组：
-{"模块A": ["子模块1", "子模块2"], "模块B": ["子模块3"]}
-
-## 规则
-- 每个模块拆 2-5 个子模块，复杂项目可适当增加但不超过 7 个
-- 输入有 N 个模块，输出必须覆盖全部 N 个模块
-  - 只输出一个 JSON 对象，不要其他内容。禁止把多个对象拼在一起：{...}{...} 是错的，必须合并为 {... , ...}`;
-
-
-const R3_FUNCTION_PROMPT = `你是产品经理。根据项目简报和已拆解的子模块，为每个子模块识别功能点。
-
-## 功能层的定位：承上启下
-功能层是业务价值和技术实现的衔接层，是拆解中最关键的一层。
-
-## 功能的定义与粒度标准
-### 是什么
-功能是用户可感知的完整业务能力，以"一个完整的用户任务/业务动作闭环"为单位。
-
-### 粒度合格标准
-- **闭环原则**：有明确的触发者、输入、业务目标和输出结果，自身是完整的业务闭环
-- **独立验证**：可独立测试、独立验收，对应一个完整的用户故事/用例
-- **一句话职责**：可用一句话说清该功能做什么，不含"和""以及"等并列词
-- **子功能数量**：每个功能下属包含 2-8 个子功能
-
-### 过粗信号（需要拆分）
-- 把多个用户任务合并为一个功能（如"登录注册"算一个功能）
-
-### 过细信号（需要合并）
-- 把操作步骤（如"输入手机号"）定义为功能
-
----
-
-以子模块"仪表盘"为例：
-  "核心指标概览"、"数据趋势图表"、"异常告警提醒"、"快捷操作入口"、"自定义看板布局"
-
-以子模块"用户管理"为例：
-  "用户列表查询"、"角色与权限分配"、"账号启停管理"、"操作日志审计"、"批量导入导出"
-
-以子模块"技术架构设计"为例：
-  "技术栈选型"、"系统分层设计"、"模块间通信方案"、"第三方服务集成方案"
-
-## 输出格式（紧凑映射）
-纯 JSON 对象，key 为子模块名，value 为该子模块的功能数组：
-{"子模块1": ["功能a", "功能b"], "子模块2": ["功能c"]}
-
-## 规则
-- 每个子模块承载 2-5 个功能（极简单情况可以只有 1 个）
-- 功能命名回答"用户能做什么"（业务）或"设计要解决什么"（design）
-- 输入有 N 个子模块，输出必须覆盖全部 N 个子模块
-  - 只输出一个 JSON 对象，不要其他内容。禁止把多个对象拼在一起：{...}{...} 是错的，必须合并为 {... , ...}`;
-
-
-const R4_LEAF_PROMPT = `你是技术规格撰写者。根据项目简报和已识别的功能，为每个功能生成子功能和详细描述。
-
-## 子功能的定位：最小原子操作
-子功能是功能内的最小原子操作单元，是不可再拆分为独立业务动作的单一执行步骤。再拆就会变成代码逻辑/字段校验/实现细节，失去独立业务意义。
-
-## 粒度控制标准
-### 合格标准
-- **单一职责**：只做一件事，职责可用一句话说清
-- **独立输入输出**：有明确的输入和输出，可被其他功能复用
-- **不是代码细节**：停留在业务动作级别，不涉及"判断长度""校验格式"等实现级内容
-
-### 过粗信号（需要拆分）
-- 把多个连续操作合并为一个子功能（如"填写信息并提交"）
-
-### 过细信号（需要合并）
-- 拆到了代码实现级（如"判断手机号长度"、"校验密码字符类型"、"数据库insert操作"）
-- 一个功能拆出了 5 个以上子功能 → 检查是否过细
-
-## 拆解逻辑
-1. **按实现维度**：一个功能的交付需要前端页面、后端接口、数据处理等维度
-2. **按子场景**：按功能的用户操作路径或业务子场景拆解
-
-以功能"用户列表查询"为例：
-  "多条件筛选搜索" → "支持按角色、状态、注册时间等多维度组合筛选用户，结果实时刷新"
-  "列表排序与分页" → "支持按姓名、时间等字段排序，大数据量下分页加载流畅"
-  "筛选方案保存" → "用户可将常用筛选条件保存为预设，下次一键应用"
-
-## 输出格式（紧凑映射）
-纯 JSON 对象，key 为功能名，value 为 {子功能名: 功能描述} 的对象：
-{"功能a": {"子功能x": "描述x", "子功能y": "描述y"}, "功能b": {"子功能z": "描述z"}}
-
-## 规则
-- 每个功能通常拆解为 1-3 个子功能。复杂功能可以到 5 个，超过 5 个检查是否过细
-- 子功能名称必须比功能更具体（不可与功能名完全相同）
-- 描述为 20-50 字，包含实现内容和业务价值
-- 输入有 N 个功能，输出必须覆盖全部 N 个功能
-  - 只输出一个 JSON 对象，不要其他内容。禁止把多个对象拼在一起：{...}{...} 是错的，必须合并为 {... , ...}`;
-
+  throw new Error("unreachable");
+}
 
 // ===========================================================================
 // Layer parsers / validators — no category, compact output
@@ -415,6 +293,77 @@ function parseLeaves(
   return triples;
 }
 
+/**
+ * Parses R4 output for a single sub-module.
+ *
+ * Supports two value formats:
+ * - Business functions: {"func_a": {"leaf_x":"desc_x",...}}  → triples with sub_function
+ * - Basic functions:    {"func_b": "desc"}                    → single triple, sub_function = func
+ */
+function parseLeavesForSubModule(
+  raw: unknown,
+  subModule: string,
+  expectedFuncs: string[],
+): [string, string, string][] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Decomposer R4 [${subModule}]: expected JSON object (not array)`);
+  }
+  const obj = raw as Record<string, unknown>;
+  const triples: [string, string, string][] = [];
+
+  for (const [func, children] of Object.entries(obj)) {
+    if (!expectedFuncs.includes(func)) {
+      throw new Error(
+        `Decomposer R4 [${subModule}]: unknown function "${func}" — not in expected list`,
+      );
+    }
+
+    // Basic (infrastructure) function: string value → single leaf, sub_func = func
+    if (typeof children === "string") {
+      const desc = children.trim();
+      if (!desc) {
+        throw new Error(`Decomposer R4 [${subModule}]: empty description for "${func}"`);
+      }
+      triples.push([func, func, desc]);
+      continue;
+    }
+
+    if (!children || typeof children !== "object" || Array.isArray(children)) {
+      throw new Error(
+        `Decomposer R4 [${subModule}]: value for "${func}" must be an object or string`,
+      );
+    }
+
+    // Business function: object value → sub_function leaves
+    for (const [subFunc, desc] of Object.entries(children as Record<string, unknown>)) {
+      if (typeof subFunc !== "string" || !subFunc.trim()) {
+        throw new Error(`Decomposer R4 [${subModule}]: empty sub_function key under "${func}"`);
+      }
+      if (subFunc === func) {
+        throw new Error(
+          `Decomposer R4 [${subModule}]: sub_function "${subFunc}" must differ from function "${func}"`,
+        );
+      }
+      if (typeof desc !== "string" || !desc.trim()) {
+        throw new Error(`Decomposer R4 [${subModule}]: empty description for "${func}" → "${subFunc}"`);
+      }
+      triples.push([func, subFunc.trim(), desc.trim()]);
+    }
+  }
+
+  if (triples.length === 0) {
+    throw new Error(`Decomposer R4 [${subModule}]: no valid leaf triples generated`);
+  }
+
+  const covered = new Set(triples.map((t) => t[0]));
+  const missing = expectedFuncs.filter((f) => !covered.has(f));
+  if (missing.length > 0) {
+    throw new Error(`Decomposer R4 [${subModule}]: missing leaves for: ${missing.join(", ")}`);
+  }
+
+  return triples;
+}
+
 // ===========================================================================
 // Final stitch — reconstructs QuotationRow[] from the forward-reference chain
 // ===========================================================================
@@ -506,43 +455,20 @@ function buildR3Prompt(r2Pairs: [string, string][], brief: string): string {
   ].join("\n");
 }
 
-function buildR4Prompt(
-  r3Pairs: [string, string][],
-  r2Pairs: [string, string][],
+function buildR4PromptForSubModule(
+  module: string,
+  subModule: string,
+  funcs: string[],
   brief: string,
 ): string {
-  // Reconstruct full hierarchy for context
-  const subToModule = new Map<string, string>();
-  for (const [mod, sub] of r2Pairs) subToModule.set(sub, mod);
-
-  const funcToSub = new Map<string, string>();
-  for (const [sub, func] of r3Pairs) funcToSub.set(func, sub);
-
-  // Group functions by (module, sub_module)
-  const grouped = new Map<string, string[]>();
-  for (const [, func] of r3Pairs) {
-    const sub = funcToSub.get(func)!;
-    const mod = subToModule.get(sub)!;
-    const key = `${mod} → ${sub}`;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key)!.push(func);
-  }
-
-  const hierarchy = [...grouped.entries()]
-    .map(([key, funcs]) => `  ${key} → ${funcs.join("、")}`)
-    .join("\n");
-
-  const funcNames = r3Pairs.map((p) => p[1]);
-
   return [
-    "完整层级关系：",
-    hierarchy,
+    `当前拆解路径：${module} → ${subModule}`,
     "",
     "项目简报：",
     brief,
     "",
-    `请为以下 ${funcNames.length} 个功能生成子功能和描述。输出格式：{"功能名":{"子功能名":"描述",...}}`,
-    `功能列表：${JSON.stringify(funcNames)}`,
+    `请为子模块"${subModule}"下的 ${funcs.length} 个功能生成子功能和描述。输出格式：{"功能名":{"子功能名":"描述",...}}`,
+    `功能列表：${JSON.stringify(funcs)}`,
   ].join("\n");
 }
 
@@ -584,6 +510,64 @@ function formatPreviousRows(rows: QuotationRow[]): string {
   return lines.join("\n");
 }
 
+/**
+ * Filters previousRows to only include rows for a specific sub_module,
+ * keeping the module context header. Returns empty string if no rows match.
+ */
+function formatPreviousRowsForSubModule(rows: QuotationRow[], targetSubModule: string): string {
+  const filtered = rows.filter((r) => r.sub_module === targetSubModule);
+  if (!filtered.length) return "";
+
+  const funcMap = new Map<string, [string, string][]>();
+  for (const r of filtered) {
+    if (!funcMap.has(r.function)) funcMap.set(r.function, []);
+    funcMap.get(r.function)!.push([r.sub_function, r.description]);
+  }
+
+  const lines: string[] = [];
+  const module = filtered[0].module;
+  lines.push(`## 参考：上一次拆解结果（子模块"${targetSubModule}"，共 ${filtered.length} 个叶子行）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+  lines.push(`### ${module} → ${targetSubModule}`);
+  for (const [func, leaves] of funcMap) {
+    lines.push(`  - ${func}`);
+    for (const [subFunc, desc] of leaves) {
+      lines.push(`    - ${subFunc}: ${desc}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// ===========================================================================
+// invokeR4ForSubModule — runs a single sub-module's R4 round with retry
+// ===========================================================================
+
+async function invokeR4ForSubModule(
+  model: BaseChatModel,
+  agentName: string,
+  systemPrompt: string,
+  module: string,
+  subModule: string,
+  funcs: string[],
+  brief: string,
+  instructions?: string,
+  previousRowsContext?: string,
+): Promise<[string, string, string][]> {
+  const baseUserPrompt = buildR4PromptForSubModule(module, subModule, funcs, brief);
+
+  return invokeRoundWithRetry(
+    model,
+    agentName,
+    systemPrompt,
+    baseUserPrompt,
+    (raw) => parseLeavesForSubModule(raw, subModule, funcs),
+    instructions,
+    previousRowsContext,
+  );
+}
+
 // ===========================================================================
 // BFS orchestrator — 4 rounds, each focusing on one hierarchy level
 // ===========================================================================
@@ -615,63 +599,93 @@ export async function runDecomposer(
   });
 
   const overrides = getSessionConfig(sessionId)?.promptOverrides;
-  const r1Prompt = resolvePrompt("decomposer_r1", overrides) || R1_MODULE_PROMPT;
-  const r2Prompt = resolvePrompt("decomposer_r2", overrides) || R2_SUB_MODULE_PROMPT;
-  const r3Prompt = resolvePrompt("decomposer_r3", overrides) || R3_FUNCTION_PROMPT;
-  const r4Prompt = resolvePrompt("decomposer_r4", overrides) || R4_LEAF_PROMPT;
+  const r1Prompt = resolvePrompt("decomposer_r1", overrides);
+  const r2Prompt = resolvePrompt("decomposer_r2", overrides);
+  const r3Prompt = resolvePrompt("decomposer_r3", overrides);
+  const r4Prompt = resolvePrompt("decomposer_r4", overrides);
 
   // ── Round 1: Modules (flat string array) ──
   onProgress?.({ stage: "识别产品模块", round: 0, totalRounds: 4, message: "正在分析产品模块划分..." });
-  const r1Raw = await invokeRoundWithContext(
+  const modules = await invokeRoundWithRetry(
     model,
     "decomposer_r1",
     r1Prompt,
     `项目简报：\n\n${brief}\n\n请列出所有一级模块。输出格式：["模块A", "模块B"]`,
+    parseModules,
     instructions,
     previousRowsContext,
   );
-  const modules = parseModules(r1Raw);
   onProgress?.({ stage: "识别产品模块", round: 1, totalRounds: 4, message: `已识别 ${modules.length} 个模块` });
 
   // ── Round 2: Sub-Modules ({module → [sub_modules]}) ──
   onProgress?.({ stage: "拆解子模块", round: 1, totalRounds: 4, message: "正在拆解子模块..." });
-  const r2Raw = await invokeRoundWithContext(
+  const r2Pairs = await invokeRoundWithRetry(
     model,
     "decomposer_r2",
     r2Prompt,
     buildR2Prompt(modules, brief),
+    (raw) => parseSubModules(raw, modules),
     instructions,
     previousRowsContext,
   );
-  const r2Pairs = parseSubModules(r2Raw, modules);
   const subModules = r2Pairs;
   onProgress?.({ stage: "拆解子模块", round: 2, totalRounds: 4, message: `已拆解 ${r2Pairs.length} 个子模块` });
 
   // ── Round 3: Functions ({sub_module → [functions]}) ──
   onProgress?.({ stage: "识别功能点", round: 2, totalRounds: 4, message: "正在识别功能点..." });
-  const r3Raw = await invokeRoundWithContext(
+  const r3Pairs = await invokeRoundWithRetry(
     model,
     "decomposer_r3",
     r3Prompt,
     buildR3Prompt(r2Pairs, brief),
+    (raw) => parseFunctions(raw, r2Pairs),
     instructions,
     previousRowsContext,
   );
-  const r3Pairs = parseFunctions(r3Raw, r2Pairs);
   onProgress?.({ stage: "识别功能点", round: 3, totalRounds: 4, message: `已识别 ${r3Pairs.length} 个功能点` });
 
   // ── Round 4: Leaves ({function → {sub_function: description}}) ──
+  // Chunked by sub_module: each sub-module's functions are sent in a separate parallel LLM call.
+  // This avoids token limit issues on large projects and enables parallel execution.
   onProgress?.({ stage: "生成子功能详情", round: 3, totalRounds: 4, message: "正在生成子功能详情..." });
-  const r4Raw = await invokeRoundWithContext(
-    model,
-    "decomposer_r4",
-    r4Prompt,
-    buildR4Prompt(r3Pairs, r2Pairs, brief),
-    instructions,
-    previousRowsContext,
+
+  // Build sub_module → (module, functions) index
+  const subToModule = new Map<string, string>();
+  for (const [mod, sub] of r2Pairs) subToModule.set(sub, mod);
+
+  const subsFuncs = new Map<string, { module: string; funcs: string[] }>();
+  for (const [sub, func] of r3Pairs) {
+    let entry = subsFuncs.get(sub);
+    if (!entry) {
+      entry = { module: subToModule.get(sub)!, funcs: [] };
+      subsFuncs.set(sub, entry);
+    }
+    entry.funcs.push(func);
+  }
+
+  // Fire parallel R4 calls — one per sub-module
+  const subResults = await Promise.all(
+    [...subsFuncs.entries()].map(([subModule, { module, funcs }]) => {
+      const filteredPrevRows = input.previousRows?.length
+        ? formatPreviousRowsForSubModule(input.previousRows, subModule)
+        : undefined;
+      return invokeR4ForSubModule(
+        model,
+        "decomposer_r4",
+        r4Prompt,
+        module,
+        subModule,
+        funcs,
+        brief,
+        instructions,
+        filteredPrevRows,
+      );
+    }),
   );
-  const r4Triples = parseLeaves(r4Raw, r3Pairs);
-  onProgress?.({ stage: "生成子功能详情", round: 4, totalRounds: 4, message: `已生成 ${r4Triples.length} 个子功能` });
+
+  // Flatten all sub-module results into single triple array
+  const r4Triples: [string, string, string][] = subResults.flat();
+  onProgress?.({ stage: "生成子功能详情", round: 4, totalRounds: 4, message: `已生成 ${r4Triples.length} 个子功能（${subsFuncs.size} 块并行）` });
 
   // ── Stitch: reconstruct QuotationRow[] from the forward-reference chain ──
   const rows = stitch(r2Pairs, r3Pairs, r4Triples);

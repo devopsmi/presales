@@ -37,6 +37,7 @@ import { runDecomposer } from "@/lib/agent/sub-agents/decomposer";
 import { runEstimator } from "@/lib/agent/sub-agents/estimator";
 import log from "@/lib/logger";
 import { createModelLoggingMiddleware } from "@/lib/agent/llm";
+import { resolvePrompt } from "@/lib/prompt-defaults";
 
 const logger = log.child({ agent: "main" });
 
@@ -218,53 +219,6 @@ function computeQuotationResult(
 
   return { header, rows, trades: Array.from(trades), tradeTotals, totalCost, budgetAdvice };
 }
-
-// ---------------------------------------------------------------------------
-// System prompt
-// ---------------------------------------------------------------------------
-
-const MAIN_SYSTEM_PROMPT = `你是售前方案主管 Agent，负责与客户沟通并调度子Agent完成报价。
-
-## 决策流程
-1. 检查消息中是否有文件状态提示，如有待解析文件，调用 parse_files 解析
-2. 收集信息：用户描述 + 已解析文件内容（用 query_file 逐文件查看）
-3. 评估信息是否足够生成完整简报。如不足：
-   - 用 grill_me 检视缺失维度
-   - 主动向用户提问补充
-   - 反复此过程直到信息充分
-4. 信息足够后，汇总生成结构化简报，调用 write_brief 保存
-5. 调用 decompose 拆解功能清单
-6. 调用 estimate_hours 生成报价
-
-## 工具说明
-- **parse_files**: 启动文件解析子Agent，逐文件读取文本并保存摘要。有未解析文件时调用。
-- **query_file**: 查看指定文件索引的已解析内容，阅读文件需求细节。
-- **write_brief**: 保存结构化需求简报（Markdown）。格式需包含：项目标题、客户信息（名称+行业）、项目概述、核心模块列表、技术要求、交付要求。在信息收集充分后调用。
-- **grill_me**: 从7个维度检查需求完整性（范围、用户角色、功能、技术约束、第三方集成、数据规模、交付时间）。信息收集阶段调用时，需将已收集的需求信息传入 context 参数；write_brief 后调用时无需参数。
-- **decompose**: 将需求简报拆解为五级功能清单。必须在 write_brief 后调用。
-- **estimate_hours**: 估算工时并生成报价。必须在 decompose 后调用。
-
-## 核心原则
-- demand-driven: 只在需要时解析文件、只在信息不足时追问
-- 最终报价以 estimate_hours 的输出为准
-
-## 用户反馈处理（灵活修改）
-当用户对已有结果提出修改意见时，判断影响范围后选择性重走管线，而非每次都全量重建：
-
-### 影响范围判定
-- **仅涉及工时**（如"前端估低了"、"整体加20%"、"backend减半"）→ 只调用 estimate_hours(instructions="用户的具体要求")，不重走前面步骤
-- **仅涉及拆解**（如"粒度太粗"、"把某模块拆开"、"调整子功能描述"、"合并相似功能"）→ 调用 decompose(instructions="用户的具体要求")，完成后必须自动调用 estimate_hours()
-- **涉及需求变更**（如"再加一个XX功能"、"需求理解错了"、"删除YY模块"）→ 调用 write_brief(更新后的完整简报)，然后依次调用 decompose() → estimate_hours()
-
-### 指令传递
-- 调用 decompose/estimate_hours 时，必须将用户的具体修改要求原样或精炼后写入 instructions 参数
-- instructions 必须具体明确，不可泛泛而谈。正确示例："前端工时整体增加20%"、"每个模块至少拆5个子模块"；错误示例："改一下"
-- 若不涉及修改（首次或全量重建），不传 instructions
-
-### 一致性保证
-- 调了 decompose 后必须随后调 estimate_hours
-- 调了 write_brief 后必须随后依次调 decompose 和 estimate_hours
-- 修改完成后简要说明变更内容`;
 
 // ---------------------------------------------------------------------------
 // Tool builders — all resolve session via config.configurable.thread_id
@@ -517,10 +471,14 @@ function buildGrillMeTool(model: BaseChatModel) {
 }
 
 // ---------------------------------------------------------------------------
-// Agent factory — caches compiled agent per model
+// Agent factory — caches compiled agent per (model, systemPrompt) pair
 // ---------------------------------------------------------------------------
 
-function buildAgent(model: BaseChatModel) {
+function hashPrompt(prompt: string): string {
+  return Buffer.from(prompt).toString("base64").slice(0, 16);
+}
+
+function buildAgent(model: BaseChatModel, systemPrompt: string) {
   return createAgent({
     model,
     tools: [
@@ -531,7 +489,7 @@ function buildAgent(model: BaseChatModel) {
       buildDecomposeTool(model),
       buildEstimateHoursTool(model),
     ],
-    systemPrompt: MAIN_SYSTEM_PROMPT,
+    systemPrompt,
     middleware: [createModelLoggingMiddleware("main")],
     checkpointer: sharedCheckpointer,
   });
@@ -553,11 +511,14 @@ export function createPresalesAgent(input: CreateMainAgentInput) {
   ingestAttachments(cache, input.attachments);
 
   const modelKey = getModelKey(input.model);
+  const sessionConfig = getSessionConfig(sessionId);
+  const effectivePrompt = resolvePrompt("main", sessionConfig.promptOverrides);
+  const cacheKey = `${modelKey}__${hashPrompt(effectivePrompt)}`;
 
-  if (!agentCache.has(modelKey)) {
-    agentCache.set(modelKey, buildAgent(input.model));
-    logger.info("agent created and cached", { modelKey });
+  if (!agentCache.has(cacheKey)) {
+    agentCache.set(cacheKey, buildAgent(input.model, effectivePrompt));
+    logger.info("agent created and cached", { modelKey, promptHash: hashPrompt(effectivePrompt) });
   }
 
-  return agentCache.get(modelKey)!;
+  return agentCache.get(cacheKey)!;
 }

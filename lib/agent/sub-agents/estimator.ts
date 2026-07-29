@@ -91,12 +91,16 @@ function buildHeader(input: { customerName: string; projectName: string; vendorN
   };
 }
 
-function buildUserPrompt(input: {
+function buildUserPromptForChunk(input: {
+  module: string;
+  subModule: string;
   rows: QuotationRow[];
   selectedTrades: TradeRole[];
   customerName: string;
   projectName: string;
   instructions?: string;
+  totalChunks: number;
+  chunkIndex: number;
 }): string {
   const tradeNames = input.selectedTrades.join("、");
   const items = input.rows
@@ -104,6 +108,7 @@ function buildUserPrompt(input: {
     .join("\n");
 
   const parts = [
+    `当前估算范围：${input.module} → ${input.subModule}（第 ${input.chunkIndex}/${input.totalChunks} 块）`,
     `客户选择的工种：${tradeNames}`,
     `客户名称：${input.customerName || "未指定"}`,
     `项目名称：${input.projectName || "未指定"}`,
@@ -122,6 +127,110 @@ function buildUserPrompt(input: {
   );
 
   return parts.join("\n");
+}
+
+async function invokeEstimateChunk(
+  model: BaseChatModel,
+  systemPrompt: string,
+  chunk: {
+    module: string;
+    subModule: string;
+    rows: QuotationRow[];
+    selectedTrades: TradeRole[];
+    customerName: string;
+    projectName: string;
+    instructions?: string;
+    totalChunks: number;
+    chunkIndex: number;
+  },
+): Promise<Record<string, Record<string, unknown>>> {
+  const expectedSeqs = new Set(chunk.rows.map((r) => String(r.seq)));
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let userPrompt = buildUserPromptForChunk(chunk);
+    if (attempt > 0) {
+      userPrompt += `\n\n⚠️ 上一次输出校验失败，请修正后重新输出。确保覆盖 seq: ${[...expectedSeqs].join(", ")}`;
+    }
+
+    const agent = createAgent({
+      model,
+      systemPrompt,
+      middleware: [createModelLoggingMiddleware("estimator")],
+    });
+
+    const result = await agent.invoke({
+      messages: [new HumanMessage(userPrompt)],
+    });
+
+    const rawContent = result.messages?.at(-1)?.content;
+    const output = extractStringContent(rawContent);
+
+    if (!output) {
+      throw new Error(
+        `Estimator [${chunk.subModule}]: empty output on attempt ${attempt + 1}`,
+      );
+    }
+
+    const match = output.match(/\{[\s\S]*\}/);
+    if (!match) {
+      throw new Error(
+        `Estimator [${chunk.subModule}]: no JSON object found in output`,
+      );
+    }
+
+    let parsed: unknown;
+    try { parsed = JSON.parse(match[0]); } catch (err) {
+      if (attempt === 0) {
+        logger.warn(`estimator [${chunk.subModule}] attempt 1 parse failed, retrying`, {
+          error: String(err),
+        });
+        continue;
+      }
+      throw new Error(
+        `Estimator [${chunk.subModule}]: failed to parse JSON — ${String(err)}`,
+      );
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      if (attempt === 0) {
+        logger.warn(`estimator [${chunk.subModule}] attempt 1: not a JSON object`, {
+          type: parsed === null ? "null" : typeof parsed,
+        });
+        continue;
+      }
+      throw new Error(
+        `Estimator [${chunk.subModule}]: expected JSON object, got ${parsed === null ? "null" : typeof parsed}`,
+      );
+    }
+
+    const obj = parsed as Record<string, unknown>;
+    const gotSeqs = new Set(Object.keys(obj));
+    const missing = [...expectedSeqs].filter((s) => !gotSeqs.has(s));
+    if (missing.length > 0) {
+      if (attempt === 0) {
+        logger.warn(`estimator [${chunk.subModule}] attempt 1: missing seqs`, {
+          missing: missing.join(", "),
+        });
+        continue;
+      }
+      throw new Error(
+        `Estimator [${chunk.subModule}]: missing trades for seq: ${missing.join(", ")}`,
+      );
+    }
+
+    // Validate each seq's trades are objects
+    for (const [seqStr, trades] of Object.entries(obj)) {
+      if (!trades || typeof trades !== "object" || Array.isArray(trades)) {
+        throw new Error(
+          `Estimator [${chunk.subModule}]: trades for seq ${seqStr} is not an object`,
+        );
+      }
+    }
+
+    return obj as Record<string, Record<string, unknown>>;
+  }
+
+  throw new Error(`Estimator [${chunk.subModule}]: unreachable`);
 }
 
 export async function runEstimator(
@@ -150,57 +259,49 @@ export async function runEstimator(
   }
 
   const overrides = getSessionConfig(sessionId)?.promptOverrides;
-  const planKey = "plan_" + input.estimationPlanId.replace(/-/g, "_");
+  const planKey = "plan_" + input.estimationPlanId.replace(/-plan$/, "").replace(/-/g, "_");
   const planContent = overrides?.[planKey]?.trim() || loadPlan(input.estimationPlanId);
   const systemPrompt = buildSystemPrompt(planContent, input.selectedTrades);
-  const userPrompt = buildUserPrompt({
-    rows: input.rows,
+
+  // Group rows by sub_module for parallel chunked estimation.
+  // Falls back to module-level grouping if a sub_module has too few rows.
+  const groupKey = (r: QuotationRow) => `${r.module}::${r.sub_module}`;
+  const chunkMap = new Map<string, QuotationRow[]>();
+  for (const r of input.rows) {
+    const key = groupKey(r);
+    if (!chunkMap.has(key)) chunkMap.set(key, []);
+    chunkMap.get(key)!.push(r);
+  }
+
+  const chunks = [...chunkMap.entries()].map(([, rows], i) => ({
+    module: rows[0].module,
+    subModule: rows[0].sub_module,
+    rows,
     selectedTrades: input.selectedTrades,
     customerName: input.customerName,
     projectName: input.projectName,
     instructions: input.instructions,
-  });
+    totalChunks: chunkMap.size,
+    chunkIndex: i + 1,
+  }));
 
-  const agent = createAgent({
-    model,
-    systemPrompt,
-    middleware: [createModelLoggingMiddleware("estimator")],
-  });
+  // Fire parallel estimation calls — one per sub_module
+  const chunkResults = await Promise.all(
+    chunks.map((chunk) => invokeEstimateChunk(model, systemPrompt, chunk)),
+  );
 
-  const result = await agent.invoke({
-    messages: [new HumanMessage(userPrompt)],
-  });
-
-  const rawContent = result.messages?.at(-1)?.content;
-  const output = extractStringContent(rawContent);
-
-  if (!output) {
-    const blocks = Array.isArray(rawContent)
-      ? (rawContent as Array<{ type: string }>).map((b) => b.type).join(", ")
-      : typeof rawContent;
-    logger.error("estimator empty output", {
-      blockTypes: blocks,
-      rawLen: JSON.stringify(rawContent).length,
-    });
+  // Merge all chunk results into single seq→trades map
+  const mergedTrades: Record<string, Record<string, unknown>> = {};
+  for (const result of chunkResults) {
+    Object.assign(mergedTrades, result);
   }
 
-  // Parse compact object → stitch trades into original rows
-  const match = output.match(/\{[\s\S]*\}/);
-  if (!match) {
-    const preview = (output || "").slice(0, 500);
-    throw new Error(
-      `Estimator: no JSON object found in output (len=${(output || "").length}, preview: ${preview})`,
-    );
-  }
-
-  let parsed: unknown;
-  try { parsed = JSON.parse(match[0]); } catch {
-    throw new Error("Estimator: failed to parse JSON object");
-  }
-
-  const rows = parseEstimatedRows(parsed, input.rows);
+  const rows = parseEstimatedRows(mergedTrades, input.rows);
   const header = buildHeader(input);
 
-  logger.info("estimator complete", { rowCount: rows.length });
+  logger.info("estimator complete", {
+    rowCount: rows.length,
+    chunks: chunks.length,
+  });
   return { rows, header, quotationJson: JSON.stringify({ header, rows }) };
 }
