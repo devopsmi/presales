@@ -636,7 +636,7 @@ export const MessageList = memo(function MessageList({
   );
 });
 
-function AssistantParts({
+const AssistantParts = memo(function AssistantParts({
   msg,
   isLast,
   isStreaming,
@@ -776,4 +776,4 @@ function AssistantParts({
   }
 
   return <div className="group/assistant-turn">{elements}</div>;
-}
+});

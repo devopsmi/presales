@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useCallback, useRef, useState } from "react";
+import { useEffect, useMemo, useCallback, useRef, useState, useDeferredValue } from "react";
 import { FileText } from "lucide-react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
@@ -87,7 +87,9 @@ function extractQuotationFromToolPart(
         : deriveTradesFromRows(data.rows);
       return { header: data.header, rows: data.rows, trades };
     }
-  } catch { }
+  } catch (e) {
+    console.error("[extractQuotationFromToolPart] parse failed:", e);
+  }
   return null;
 }
 
@@ -206,6 +208,12 @@ export function AgentChatPanel() {
     },
   });
 
+  // Decouple rendering from raw SSE-driven state updates.
+  // During fast token streaming, React may defer rendering the latest
+  // message content by one frame, keeping the UI responsive to input
+  // instead of blocking on Markdown re-parsing at every delta.
+  const deferredMessages = useDeferredValue(messages);
+
   const attachedFiles: AttachedFile[] = useMemo(
     () =>
       attachments.map((f, i) => ({
@@ -238,6 +246,21 @@ export function AgentChatPanel() {
       }
     }
   }, [messages, setFileParsedContent]);
+
+  // Fallback: if onFinish missed the estimator output (race condition where
+  // the last message doesn't yet have state="output-available"), the effect
+  // retries on every messages change until extraction succeeds or gives up.
+  useEffect(() => {
+    if (quotationExtractedRef.current) return;
+    if (status !== "ready") return;
+    const q = extractQuotationFromMessages(
+      messages as Array<{ parts?: Array<{ type: string; state?: string; output?: unknown }> }>,
+    );
+    if (q) {
+      quotationExtractedRef.current = true;
+      setQuotationResult(q.header, q.rows, q.trades);
+    }
+  }, [messages, status, setQuotationResult]);
 
   useEffect(() => {
     if (status === "ready" && messages.length === 0) {
@@ -276,7 +299,7 @@ export function AgentChatPanel() {
     >
       <div className="flex-1 min-h-0 overflow-scroll scrollbar-none">
         <MessageList
-          messages={messages}
+          messages={deferredMessages}
           status={status}
           toolRenderers={{
             subagent_decomposer: DecomposerProgressCard,

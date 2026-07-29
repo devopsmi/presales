@@ -164,16 +164,38 @@ export async function POST(req: Request) {
           let toolEventInterrupted = false;
           let textCounter = 0;
 
+          // Batch text-delta events at ~60fps to reduce the number of SSE
+          // messages and React state updates during streaming. Without batching,
+          // each individual token triggers a separate SSE event, causing 50+
+          // re-renders per second on the client.
+          const TEXT_FLUSH_INTERVAL_MS = 16;
+
           await Promise.all([
             (async () => {
               for await (const message of run.messages) {
                 let textStarted = false;
                 let currentTextId = `${Date.now()}-${textCounter++}`;
+                let tokenBuffer: string[] = [];
+                let lastFlushTime = 0;
+
+                const flushBuffer = () => {
+                  if (tokenBuffer.length === 0) return;
+                  const combined = tokenBuffer.join("");
+                  tokenBuffer = [];
+                  lastFlushTime = Date.now();
+                  if (!textStarted) {
+                    send({ type: "text-start", id: currentTextId });
+                    textStarted = true;
+                  }
+                  send({ type: "text-delta", id: currentTextId, delta: combined });
+                };
+
                 for await (const token of message.text) {
                   // If a tool event was sent since the last text token,
                   // close the current text part and start a new one so
                   // the tool card sits between them.
                   if (toolEventInterrupted) {
+                    flushBuffer();
                     if (textStarted) {
                       send({ type: "text-end", id: currentTextId });
                     }
@@ -181,12 +203,16 @@ export async function POST(req: Request) {
                     textStarted = false;
                     toolEventInterrupted = false;
                   }
-                  if (!textStarted) {
-                    send({ type: "text-start", id: currentTextId });
-                    textStarted = true;
+
+                  tokenBuffer.push(token);
+
+                  const now = Date.now();
+                  if (now - lastFlushTime >= TEXT_FLUSH_INTERVAL_MS) {
+                    flushBuffer();
                   }
-                  send({ type: "text-delta", id: currentTextId, delta: token });
                 }
+                // Flush remaining tokens and end the text part
+                flushBuffer();
                 if (textStarted) {
                   send({ type: "text-end", id: currentTextId });
                 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { Streamdown, type Components } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
 import { cn } from "./utils/cn";
@@ -47,7 +48,7 @@ const code = createCodePlugin({
   themes: ["github-light", "github-dark"],
 });
 
-export function Markdown({ content, className }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ content, className }: MarkdownProps) {
   const safeContent = normalizeCodeFenceLanguages(
     fixNumberedListBreaks(content),
   );
@@ -174,4 +175,4 @@ export function Markdown({ content, className }: MarkdownProps) {
       </Streamdown>
     </div>
   );
-}
+});
