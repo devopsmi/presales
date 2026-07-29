@@ -1,19 +1,18 @@
 /**
  * Main Agent — presales orchestration via LangChain createAgent (Subagent pattern).
  *
- * Exposes 6 tools (3 sub-agents + query_file + write_brief + grill-me) to the LLM.
+ * Exposes 5 tools (3 sub-agents + query_file + grill-me) to the LLM.
  *
  * Agent + MemorySaver are module-level singletons – created once, reused across
  * all requests per model. Each tool resolves its session-scoped PipelineCache
  * and SessionConfig at runtime via config.configurable.thread_id (= sessionId).
  *
  * Dispatch chain:
- *   parse_files → query_file → grill_me (clarify) → write_brief → decompose → estimate_hours
+ *   parse_files → query_file → grill_me (clarify) → decompose → estimate_hours
  *
  * Tools:
- *   parse_files    → FileParser sub-agent
+ *   parse_files    → FileParser sub-agent + auto-generates structuredBrief
  *   query_file     → read parsed file content by index
- *   write_brief    → save structured requirement brief
  *   decompose      → Decomposer sub-agent
  *   estimate_hours → Estimator sub-agent + quotation computation
  *   grill_me       → loads grill-me skill, runs clarification check (before or after brief)
@@ -232,11 +231,38 @@ function buildParseFilesTool(model: BaseChatModel) {
       logger.info("parse_files called", { sessionId });
       await runFileParser(model, sessionId, cache.fileStore);
 
-      cache.stage = "parsed";
-
+      // Auto-generate structuredBrief from parsed file content
       const all = Array.from(cache.fileStore.values());
       const parsed = all.filter((f) => f.parsed);
       const unparsed = all.filter((f) => !f.parsed);
+
+      if (parsed.length > 0) {
+        const briefParts: string[] = ["## 文件解析汇总\n"];
+        for (const f of parsed) {
+          briefParts.push(`### ${f.name}\n${f.parsed}`);
+        }
+        cache.structuredBrief = briefParts.join("\n");
+
+        // Extract customerName and projectName from file content
+        const allContent = parsed.map((f) => f.parsed).join("\n");
+        cache.customerName =
+          allContent.match(/客户名称[：:]\s*(.+)/)?.[1]?.trim() ??
+          allContent.match(/客户[：:]\s*(.+)/)?.[1]?.trim() ??
+          "未指定客户";
+        cache.projectName =
+          allContent.match(/项目名[称称][：:]\s*(.+)/)?.[1]?.trim() ??
+          allContent.match(/项目[：:]\s*(.+)/)?.[1]?.trim() ??
+          "未指定项目";
+
+        logger.info("brief auto-generated from parsed files", {
+          sessionId,
+          customerName: cache.customerName,
+          projectName: cache.projectName,
+          fileCount: parsed.length,
+        });
+      }
+
+      cache.stage = "parsed";
 
       return JSON.stringify({
         status: "ok",
@@ -244,7 +270,7 @@ function buildParseFilesTool(model: BaseChatModel) {
         unparsedCount: unparsed.length,
         parsedFiles: parsed.map((f) => ({ name: f.name, type: f.type, parsed: f.parsed })),
         message: parsed.length > 0
-          ? `文件解析完成：${parsed.length} 个已解析。${unparsed.length ? ` ${unparsed.length} 个解析失败。` : ""}请使用 query_file 查看各文件内容并汇总需求简报。`
+          ? `文件解析完成：${parsed.length} 个已解析，需求简报已自动生成。${unparsed.length ? ` ${unparsed.length} 个解析失败。` : ""}`
           : "没有文件需要解析。",
       });
     },
@@ -283,36 +309,6 @@ function buildQueryFileTool() {
   );
 }
 
-function buildWriteBriefTool() {
-  return tool(
-    async ({ summary }: { summary: string }, config?: RunnableConfig) => {
-      const sessionId = getSessionId(config);
-      const cache = getOrCreateSessionCache(sessionId);
-
-      const customerName = summary.match(/客户名称[：:]\s*(.+)/)?.[1]?.trim() ?? "未指定客户";
-      const projectName = summary.match(/^##\s*(.+)/m)?.[1]?.trim() ?? "未指定项目";
-      cache.structuredBrief = summary;
-      cache.customerName = customerName;
-      cache.projectName = projectName;
-      logger.info("brief written", { sessionId, customerName, projectName, length: summary.length });
-      return JSON.stringify({
-        status: "ok",
-        customerName,
-        projectName,
-        length: summary.length,
-        message: `需求简报已保存。客户：${customerName}，项目：${projectName}`,
-      });
-    },
-    {
-      name: "write_brief",
-      description: "保存结构化的需求简报。在汇总用户需求和文件内容后调用。只需传入完整的 Markdown 格式简报。",
-      schema: z.object({
-        summary: z.string().describe("结构化的需求简报，Markdown 格式，包含项目标题、客户信息、项目概述、核心模块、技术要求、交付要求"),
-      }),
-    },
-  );
-}
-
 function buildDecomposeTool(model: BaseChatModel) {
   return tool(
     async ({ instructions }: { instructions?: string }, config?: RunnableConfig) => {
@@ -321,7 +317,7 @@ function buildDecomposeTool(model: BaseChatModel) {
 
       // Inline stage validation
       if (!cache.structuredBrief) {
-        return JSON.stringify({ status: "error", message: "请先汇总需求简报（调用 write_brief）" });
+        return JSON.stringify({ status: "error", message: "请先完成需求简报（文件解析后自动生成，或调用 parse_files）" });
       }
 
       logger.info("decompose called", { sessionId, hasInstructions: !!instructions });
@@ -353,7 +349,7 @@ function buildDecomposeTool(model: BaseChatModel) {
     },
     {
       name: "decompose",
-      description: "将需求简报拆解为五级功能清单。必须在 write_brief 后调用。可传入 instructions 做定向修改（如粒度调整、模块重组），不传则为全新拆解。",
+      description: "将需求简报拆解为五级功能清单。文件解析完成后简报自动生成，无需手动保存。可传入 instructions 做定向修改（如粒度调整、模块重组），不传则为全新拆解。",
       schema: z.object({
         instructions: z.string().optional().describe("修改指令。如'粒度更细，每个模块至少5个子模块'、'把模块A拆成用户端和管理端'。不传则全量拆解。"),
       }),
@@ -462,9 +458,9 @@ function buildGrillMeTool(model: BaseChatModel) {
     },
     {
       name: "grill_me",
-      description: "从7个维度检查需求完整性（范围、用户角色、功能、技术约束、第三方集成、数据规模、交付时间）。既可用于信息收集阶段辅助提问（传入 context 参数），也可用于 write_brief 后最终检查（无需参数）。",
+      description: "从7个维度检查需求完整性（范围、用户角色、功能、技术约束、第三方集成、数据规模、交付时间）。既可用于信息收集阶段辅助提问（传入 context 参数），也可用于简报生成后最终检查（无需参数）。",
       schema: z.object({
-        context: z.string().optional().describe("当前已收集的需求信息文本。用于 write_brief 前进行需求澄清时传入；write_brief 后调用时无需传入。"),
+        context: z.string().optional().describe("当前已收集的需求信息文本。用于简报生成前进行需求澄清时传入；简报生成后调用时无需传入。"),
       }),
     },
   );
@@ -484,7 +480,6 @@ function buildAgent(model: BaseChatModel, systemPrompt: string) {
     tools: [
       buildParseFilesTool(model),
       buildQueryFileTool(),
-      buildWriteBriefTool(),
       buildGrillMeTool(model),
       buildDecomposeTool(model),
       buildEstimateHoursTool(model),

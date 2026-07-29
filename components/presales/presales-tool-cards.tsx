@@ -346,25 +346,4 @@ export function EstimatorCard({ status, output }: CustomToolRendererProps) {
   );
 }
 
-// ===========================================================================
-// 4. WriteBriefCard — write_brief (not in mapToolName by default)
-// ===========================================================================
 
-export function WriteBriefCard({ status, output }: CustomToolRendererProps) {
-  if (status === "error") return <ErrorHeader icon={IconFileText} label="简报保存失败" />;
-
-  if (status === "success" || (output && typeof output === "object")) {
-    const o = output as Record<string, unknown>;
-    const customerName = typeof o.customerName === "string" ? o.customerName : "";
-    const projectName = typeof o.projectName === "string" ? o.projectName : "";
-    return (
-      <SuccessHeader
-        icon={IconFileText}
-        label="需求简报已保存"
-        detail={[projectName, customerName].filter(Boolean).join(" · ") || undefined}
-      />
-    );
-  }
-
-  return <PendingHeader icon={IconFileText} label="保存需求简报..." />;
-}

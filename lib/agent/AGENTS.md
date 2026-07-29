@@ -25,13 +25,13 @@ lib/agent/
 ## DISPATCH CHAIN
 
 ```
-parse_files → query_file → grill_me → write_brief → decompose → estimate_hours
+parse_files → query_file → grill_me → decompose → estimate_hours
 ```
 
 **Hard constraints:**
-- `decompose` only after `write_brief`
+- `decompose` only after parse_files has auto-generated structuredBrief
 - `estimate_hours` only after `decompose`
-- `grill_me` before `write_brief` for requirement clarification; can also run after for final completeness check
+- `grill_me` before decompose for requirement clarification; can also run after for final completeness check
 - Stage enforced by `PipelineStage` enum: `idle → parsed → decomposed → estimated`
 
 ## SESSION ARCHITECTURE
@@ -45,7 +45,7 @@ parse_files → query_file → grill_me → write_brief → decompose → estima
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Add a new tool | `main-agent.ts` — `buildXxxTool()` + add to `buildAgent()` | 6 existing: parse_files, query_file, write_brief, decompose, estimate_hours, grill_me |
+| Add a new tool | `main-agent.ts` — `buildXxxTool()` + add to `buildAgent()` | 5 existing: parse_files, query_file, decompose, estimate_hours, grill_me |
 | Change LLM behavior | `llm.ts` — `createModelInstance()` | Supports OpenAI protocol + Anthropic protocol |
 | Add estimation plan | `skills/plans/` — create new `.md` file | Frontend picks via `estimationPlanId` |
 | Change pipeline state | `state.ts` | `PipelineStageSchema`, sub-agent I/O types |
