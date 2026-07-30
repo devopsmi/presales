@@ -62,33 +62,48 @@ function parseSubModules(raw: unknown, parentModules: string[]): [string, string
 function parseFunctions(
   raw: unknown,
   parentPairs: [string, string][],
-): [string, string][] {
+): [number, string][] {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Decomposer R3: expected JSON object (not array)");
   }
   const obj = raw as Record<string, unknown>;
-  const pairs: [string, string][] = [];
+  const pairs: [number, string][] = [];
 
-  const parentSubModules = new Set(parentPairs.map((p) => p[1]));
-  for (const [subModule, children] of Object.entries(obj)) {
-    if (!parentSubModules.has(subModule)) {
-      throw new Error(`Decomposer R3: unknown sub_module "${subModule}" — not in R2 output`);
+  for (const [idxStr, children] of Object.entries(obj)) {
+    const idx = Number(idxStr);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= parentPairs.length) {
+      throw new Error(
+        `Decomposer R3: invalid index "${idxStr}" — must be integer 0-${parentPairs.length - 1}`,
+      );
     }
+    const [mod, sub] = parentPairs[idx];
     if (!Array.isArray(children)) {
-      throw new Error(`Decomposer R3: value for "${subModule}" is not an array`);
+      throw new Error(
+        `Decomposer R3: value for index "${idxStr}" (${mod}→${sub}) is not an array`,
+      );
     }
     for (const child of children) {
       if (typeof child !== "string" || !child.trim()) {
-        throw new Error(`Decomposer R3: invalid function under "${subModule}"`);
+        throw new Error(
+          `Decomposer R3: invalid function under index "${idxStr}" (${mod}→${sub})`,
+        );
       }
-      pairs.push([subModule, child.trim()]);
+      pairs.push([idx, child.trim()]);
     }
   }
 
-  const covered = new Set(pairs.map((p) => p[0]));
-  const missing = [...parentSubModules].filter((s) => !covered.has(s));
+  const covered = new Set(Object.keys(obj));
+  const missing: number[] = [];
+  for (let i = 0; i < parentPairs.length; i++) {
+    if (!covered.has(String(i))) {
+      missing.push(i);
+    }
+  }
   if (missing.length > 0) {
-    throw new Error(`Decomposer R3: missing functions for: ${missing.join(", ")}`);
+    const missingInfo = missing
+      .map((i) => `[${i}] ${parentPairs[i][0]}→${parentPairs[i][1]}`)
+      .join(", ");
+    throw new Error(`Decomposer R3: missing functions for indices: ${missingInfo}`);
   }
   return pairs;
 }
@@ -140,6 +155,79 @@ function parseLeaves(
   }
 
   return triples;
+}
+
+// ===========================================================================
+// Scoped previous-row formatters — one per hierarchy level
+// ===========================================================================
+
+interface QRow {
+  seq: number;
+  module: string;
+  sub_module: string;
+  function: string;
+  sub_function: string;
+  description: string;
+  category: string;
+  trades: Record<string, number | null>;
+  remark: string;
+}
+
+function formatPreviousModules(rows: QRow[]): string {
+  if (!rows.length) return "";
+  const modules = [...new Set(rows.map((r) => r.module))];
+  const lines: string[] = [];
+  lines.push(`## 参考：上一次拆解结果（模块层，共 ${modules.length} 个模块）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+  for (const m of modules) lines.push(`- ${m}`);
+  return lines.join("\n");
+}
+
+function formatPreviousSubModules(rows: QRow[]): string {
+  if (!rows.length) return "";
+  const map = new Map<string, Set<string>>();
+  for (const r of rows) {
+    if (!map.has(r.module)) map.set(r.module, new Set());
+    map.get(r.module)!.add(r.sub_module);
+  }
+  const totalSubs = [...map.values()].reduce((s, v) => s + v.size, 0);
+  const lines: string[] = [];
+  lines.push(`## 参考：上一次拆解结果（子模块层，${map.size} 个模块 → ${totalSubs} 个子模块）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+  for (const [mod, subs] of map) {
+    lines.push(`### ${mod}`);
+    for (const sub of subs) lines.push(`  - ${sub}`);
+  }
+  return lines.join("\n");
+}
+
+function formatPreviousFunctions(rows: QRow[]): string {
+  if (!rows.length) return "";
+  const map = new Map<string, Map<string, Set<string>>>();
+  for (const r of rows) {
+    if (!map.has(r.module)) map.set(r.module, new Map());
+    const subMap = map.get(r.module)!;
+    if (!subMap.has(r.sub_module)) subMap.set(r.sub_module, new Set());
+    subMap.get(r.sub_module)!.add(r.function);
+  }
+  let totalFuncs = 0;
+  for (const subMap of map.values()) {
+    for (const funcs of subMap.values()) totalFuncs += funcs.size;
+  }
+  const lines: string[] = [];
+  lines.push(`## 参考：上一次拆解结果（功能层，共 ${totalFuncs} 个功能）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+  for (const [mod, subMap] of map) {
+    lines.push(`### ${mod}`);
+    for (const [sub, funcs] of subMap) {
+      lines.push(`  - ${sub}`);
+      for (const func of funcs) lines.push(`    - ${func}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 // ===========================================================================
@@ -280,44 +368,65 @@ const r2Pairs: [string, string][] = [
 ];
 
 test("valid functions for both sub-modules", () => {
-  const raw = { "技术架构": ["技术选型", "部署方案"], "首页": ["Banner展示"] };
+  const raw = { "0": ["技术选型", "部署方案"], "1": ["Banner展示"] };
   const result = parseFunctions(raw, r2Pairs);
   assert.strictEqual(result.length, 3);
-  assert.deepStrictEqual(result[0], ["技术架构", "技术选型"]);
-  assert.deepStrictEqual(result[1], ["技术架构", "部署方案"]);
-  assert.deepStrictEqual(result[2], ["首页", "Banner展示"]);
+  assert.deepStrictEqual(result[0], [0, "技术选型"]);
+  assert.deepStrictEqual(result[1], [0, "部署方案"]);
+  assert.deepStrictEqual(result[2], [1, "Banner展示"]);
 });
 
 test("rejects non-object input", () => {
   assertThrows(() => parseFunctions([], r2Pairs), "expected JSON object");
 });
 
-test("rejects unknown sub_module", () => {
+test("rejects unknown sub_module (invalid index)", () => {
   assertThrows(
-    () => parseFunctions({ "技术架构": ["技术选型"], "未知子模块": ["功能"] }, r2Pairs),
-    "unknown sub_module",
+    () => parseFunctions({ "0": ["技术选型"], "5": ["功能"] }, r2Pairs),
+    "invalid index",
   );
 });
 
 test("rejects missing function for a sub-module", () => {
   assertThrows(
-    () => parseFunctions({ "技术架构": ["技术选型"] }, r2Pairs),
-    "missing functions for: 首页",
+    () => parseFunctions({ "0": ["技术选型"] }, r2Pairs),
+    "missing functions for indices: [1]",
   );
 });
 
 test("rejects non-array children", () => {
   assertThrows(
-    () => parseFunctions({ "技术架构": "not array", "首页": ["Banner"] }, r2Pairs),
+    () => parseFunctions({ "0": "not array", "1": ["Banner"] }, r2Pairs),
     "not an array",
   );
 });
 
 test("rejects empty function string", () => {
   assertThrows(
-    () => parseFunctions({ "技术架构": [""], "首页": ["Banner"] }, r2Pairs),
+    () => parseFunctions({ "0": [""], "1": ["Banner"] }, r2Pairs),
     "invalid function",
   );
+});
+
+test("handles duplicate sub-module names from different parent modules", () => {
+  const r2PairsWithDuplicates: [string, string][] = [
+    ["门店老板版", "订单管理"],
+    ["推广人员版", "订单管理"],
+    ["门店老板版", "数据分析"],
+  ];
+  const raw = {
+    "0": ["新订单列表", "已成交订单"],
+    "1": ["客户列表", "验机清单"],
+    "2": ["用户增长", "利润分析"],
+  };
+  const result = parseFunctions(raw, r2PairsWithDuplicates);
+  assert.strictEqual(result.length, 6);
+  assert.deepStrictEqual(result[0], [0, "新订单列表"]);
+  assert.deepStrictEqual(result[1], [0, "已成交订单"]);
+  assert.deepStrictEqual(result[2], [1, "客户列表"]);
+  assert.deepStrictEqual(result[3], [1, "验机清单"]);
+  assert.deepStrictEqual(result[4], [2, "用户增长"]);
+  assert.deepStrictEqual(result[5], [2, "利润分析"]);
 });
 
 // ===========================================================================
@@ -383,6 +492,130 @@ test("rejects empty result (no leaves)", () => {
 });
 
 // ===========================================================================
+// Scoped formatters tests — verify each level truncates at the right depth
+// ===========================================================================
+
+console.log("\nScoped formatters");
+
+function makeRow(mod: string, sub: string, func: string, subFunc: string): QRow {
+  return { seq: 0, module: mod, sub_module: sub, function: func, sub_function: subFunc, description: "desc", category: "feature", trades: {}, remark: "" };
+}
+
+const sampleRows: QRow[] = [
+  makeRow("系统设计", "技术架构", "技术选型", "前端框架选型"),
+  makeRow("系统设计", "技术架构", "技术选型", "后端框架选型"),
+  makeRow("系统设计", "技术架构", "部署方案", "云基础设施"),
+  makeRow("系统设计", "数据设计", "数据模型", "核心实体设计"),
+  makeRow("用户端", "首页", "Banner展示", "轮播广告"),
+  makeRow("用户端", "首页", "Banner展示", "快捷入口"),
+  makeRow("用户端", "个人中心", "个人信息", "资料编辑"),
+];
+
+test("formatPreviousModules — only module names, no sub/func/leaf details", () => {
+  const output = formatPreviousModules(sampleRows);
+  assert.ok(output.includes("系统设计"));
+  assert.ok(output.includes("用户端"));
+  // Must NOT contain sub-module, function, or sub-function names
+  assert.ok(!output.includes("技术架构"));
+  assert.ok(!output.includes("技术选型"));
+  assert.ok(!output.includes("前端框架选型"));
+  assert.ok(!output.includes("Banner展示"));
+  assert.ok(!output.includes("轮播广告"));
+});
+
+test("formatPreviousModules — deduplicates modules", () => {
+  const dupRows = [
+    makeRow("系统设计", "a", "b", "c"),
+    makeRow("系统设计", "d", "e", "f"),
+    makeRow("用户端", "g", "h", "i"),
+  ];
+  const output = formatPreviousModules(dupRows);
+  // "系统设计" should appear exactly once
+  const matches = output.match(/系统设计/g);
+  assert.strictEqual(matches?.length, 1);
+});
+
+test("formatPreviousModules — empty rows returns empty string", () => {
+  assert.strictEqual(formatPreviousModules([]), "");
+});
+
+test("formatPreviousSubModules — module→sub_module only, no func/leaf", () => {
+  const output = formatPreviousSubModules(sampleRows);
+  assert.ok(output.includes("系统设计"));
+  assert.ok(output.includes("技术架构"));
+  assert.ok(output.includes("数据设计"));
+  assert.ok(output.includes("用户端"));
+  assert.ok(output.includes("首页"));
+  assert.ok(output.includes("个人中心"));
+  // Must NOT contain function or sub-function names
+  assert.ok(!output.includes("技术选型"));
+  assert.ok(!output.includes("部署方案"));
+  assert.ok(!output.includes("Banner展示"));
+  assert.ok(!output.includes("前端框架选型"));
+  assert.ok(!output.includes("轮播广告"));
+  assert.ok(!output.includes("资料编辑"));
+});
+
+test("formatPreviousSubModules — deduplicates sub-modules", () => {
+  const dupRows = [
+    makeRow("系统设计", "技术架构", "技术选型", "前端"),
+    makeRow("系统设计", "技术架构", "技术选型", "后端"),
+    makeRow("系统设计", "技术架构", "部署方案", "云"),
+  ];
+  const output = formatPreviousSubModules(dupRows);
+  // "技术架构" should appear exactly once under 系统设计
+  const lines = output.split("\n");
+  const techArchLines = lines.filter((l: string) => l.includes("技术架构"));
+  assert.strictEqual(techArchLines.length, 1);
+});
+
+test("formatPreviousSubModules — empty rows returns empty string", () => {
+  assert.strictEqual(formatPreviousSubModules([]), "");
+});
+
+test("formatPreviousFunctions — module→sub_module→function, no leaf", () => {
+  const output = formatPreviousFunctions(sampleRows);
+  assert.ok(output.includes("系统设计"));
+  assert.ok(output.includes("技术架构"));
+  assert.ok(output.includes("技术选型"));
+  assert.ok(output.includes("部署方案"));
+  assert.ok(output.includes("数据设计"));
+  assert.ok(output.includes("数据模型"));
+  assert.ok(output.includes("用户端"));
+  assert.ok(output.includes("Banner展示"));
+  assert.ok(output.includes("个人信息"));
+  // Must NOT contain sub-function names or descriptions
+  assert.ok(!output.includes("前端框架选型"));
+  assert.ok(!output.includes("后端框架选型"));
+  assert.ok(!output.includes("云基础设施"));
+  assert.ok(!output.includes("轮播广告"));
+  assert.ok(!output.includes("资料编辑"));
+});
+
+test("formatPreviousFunctions — deduplicates functions within a sub-module", () => {
+  const dupRows = [
+    makeRow("系统设计", "技术架构", "技术选型", "前端"),
+    makeRow("系统设计", "技术架构", "技术选型", "后端"),
+  ];
+  const output = formatPreviousFunctions(dupRows);
+  // "技术选型" should appear (only in the function entry line, not in stats header)
+  const count = (output.match(/技术选型/g) || []).length;
+  assert.strictEqual(count, 1);
+});
+
+test("formatPreviousFunctions — empty rows returns empty string", () => {
+  assert.strictEqual(formatPreviousFunctions([]), "");
+});
+
+test("formatPreviousFunctions — correct indent levels (module h3, sub 2-space, func 4-space)", () => {
+  const rows = [makeRow("系统设计", "技术架构", "技术选型", "前端")];
+  const output = formatPreviousFunctions(rows);
+  assert.ok(output.includes("### 系统设计"));
+  assert.ok(output.includes("  - 技术架构"));
+  assert.ok(output.includes("    - 技术选型"));
+});
+
+// ===========================================================================
 // Full pipeline simulation (no LLM) — R1 → R2 → R3 → R4
 // ===========================================================================
 
@@ -400,12 +633,17 @@ test("R1→R2→R3→R4 all parsers chain correctly", () => {
   );
   assert.strictEqual(r2.length, 2);
 
-  // R3
+  // R3 — returns [r2_index, function] pairs
   const r3 = parseFunctions(
-    { "技术架构": ["技术选型"], "首页": ["Banner展示"] },
+    { "0": ["技术选型"], "1": ["Banner展示"] },
     r2,
   );
   assert.strictEqual(r3.length, 2);
+  assert.deepStrictEqual(r3[0], [0, "技术选型"]);
+  assert.deepStrictEqual(r3[1], [1, "Banner展示"]);
+
+  // R3 pairs for R4: look up sub_module from r2 by index
+  const r3PairsForR4: [string, string][] = r3.map(([i, func]) => [r2[i][1], func]);
 
   // R4
   const r4 = parseLeaves(
@@ -413,7 +651,7 @@ test("R1→R2→R3→R4 all parsers chain correctly", () => {
       "技术选型": { "前端框架选型": "确定前端框架" },
       "Banner展示": { "轮播广告": "首页顶部轮播广告位" },
     },
-    r3,
+    r3PairsForR4,
   );
   assert.strictEqual(r4.length, 2);
   assert.deepStrictEqual(r4[0], ["技术选型", "前端框架选型", "确定前端框架"]);

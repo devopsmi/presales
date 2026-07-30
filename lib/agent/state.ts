@@ -16,6 +16,7 @@ export const PipelineStageSchema = z.enum([
   "idle",
   "parsed",
   "decomposed",
+  "evaluated",
   "estimated",
 ]);
 
@@ -56,6 +57,19 @@ export interface EstimatorOutput {
   rows: QuotationRow[];
   header: QuotationHeader;
   quotationJson?: string;
+}
+
+export interface EvaluatorIssue {
+  severity: "error" | "warning";
+  location: string;
+  description: string;
+  seq?: number;
+}
+
+export interface EvaluatorOutput {
+  passed: boolean;
+  issues: EvaluatorIssue[];
+  summary: string;
 }
 
 export interface QuotationResult {

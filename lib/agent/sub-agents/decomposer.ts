@@ -93,7 +93,11 @@ async function invokeRoundWithContext(
 ): Promise<unknown> {
   const contextParts: string[] = [];
   if (instructions) {
-    contextParts.push(`⚠️ 修改指令: ${instructions}\n请只修改指令指定的部分，其他部分保持与参考结构一致。`);
+    contextParts.push(
+      `⚠️ 修改指令: ${instructions}\n` +
+      "请只修改指令指定的部分，其他部分保持与参考结构一致。\n" +
+      "如果修改指令引用的父级元素在当前输入中不存在（说明已被上一环节删除），跳过该指令。",
+    );
   }
   if (previousRowsContext) {
     contextParts.push(previousRowsContext);
@@ -118,10 +122,11 @@ async function invokeRoundWithRetry<T>(
   parseFn: (raw: unknown) => T,
   instructions?: string,
   previousRowsContext?: string,
+  maxAttempts = 2,
 ): Promise<T> {
   let userPrompt = baseUserPrompt;
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const raw = await invokeRoundWithContext(
         model, agentName, systemPrompt, userPrompt,
@@ -132,9 +137,22 @@ async function invokeRoundWithRetry<T>(
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
 
-      if (attempt === 0) {
-        logger.warn(`${agentName} attempt 1 failed, retrying`, { error: errMsg });
-        userPrompt = `${baseUserPrompt}\n\n⚠️ 上一次输出校验失败：${errMsg}\n请修正后重新输出。`;
+      if (attempt < maxAttempts - 1) {
+        logger.warn(`${agentName} attempt ${attempt + 1} failed, retrying`, { error: errMsg });
+
+        // Build round-specific retry hint to avoid confusing R4 with R3's index format
+        let retryHint: string;
+        if (agentName === "decomposer_r3") {
+          retryHint = "修正要求：\n- JSON 的 key 必须使用输入中给出的索引数字字符串（\"0\", \"1\", ...）\n- key 必须是有效的整数索引，对应输入列表中 [0], [1], ... 的项目\n- 每个索引必须覆盖到，不要遗漏，不要自创索引";
+        } else if (agentName === "decomposer_r4") {
+          retryHint = "修正要求：\n- JSON 的 key 必须与功能列表中的名称逐字一致，不要加前缀、后缀或任何修饰\n- 不要自创名称，不要修改输入列表中的任何名称";
+        } else if (agentName === "decomposer_r2") {
+          retryHint = "修正要求：\n- JSON 的 key 必须与模块列表中的名称逐字一致，不要加前缀、后缀或任何修饰";
+        } else {
+          retryHint = "修正要求：\n- 请严格按照输入格式和输出格式要求重新输出";
+        }
+
+        userPrompt = `${baseUserPrompt}\n\n⚠️ 上一次输出校验失败：${errMsg}\n\n${retryHint}\n\n请修正后重新输出。`;
       } else {
         throw err instanceof Error ? err : new Error(String(err));
       }
@@ -202,40 +220,52 @@ function parseSubModules(raw: unknown, parentModules: string[]): [string, string
   return pairs;
 }
 
-/**
- * Parses R3 output: {"子模块1": ["功能a","功能b"], "子模块2": ["功能c"]}
- * Returns flat [sub_module, function] pairs.
- */
 function parseFunctions(
   raw: unknown,
   parentPairs: [string, string][],
-): [string, string][] {
+): [number, string][] {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Decomposer R3: expected JSON object (not array)");
   }
   const obj = raw as Record<string, unknown>;
-  const pairs: [string, string][] = [];
+  const pairs: [number, string][] = [];
 
-  const parentSubModules = new Set(parentPairs.map((p) => p[1]));
-  for (const [subModule, children] of Object.entries(obj)) {
-    if (!parentSubModules.has(subModule)) {
-      throw new Error(`Decomposer R3: unknown sub_module "${subModule}" — not in R2 output`);
+  for (const [idxStr, children] of Object.entries(obj)) {
+    const idx = Number(idxStr);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= parentPairs.length) {
+      throw new Error(
+        `Decomposer R3: invalid index "${idxStr}" — must be integer 0-${parentPairs.length - 1}`,
+      );
     }
+    const [mod, sub] = parentPairs[idx];
     if (!Array.isArray(children)) {
-      throw new Error(`Decomposer R3: value for "${subModule}" is not an array`);
+      throw new Error(
+        `Decomposer R3: value for index "${idxStr}" (${mod}→${sub}) is not an array`,
+      );
     }
     for (const child of children) {
       if (typeof child !== "string" || !child.trim()) {
-        throw new Error(`Decomposer R3: invalid function under "${subModule}"`);
+        throw new Error(
+          `Decomposer R3: invalid function under index "${idxStr}" (${mod}→${sub})`,
+        );
       }
-      pairs.push([subModule, child.trim()]);
+      pairs.push([idx, child.trim()]);
     }
   }
 
-  const covered = new Set(pairs.map((p) => p[0]));
-  const missing = [...parentSubModules].filter((s) => !covered.has(s));
+  // Validate all indices are covered
+  const covered = new Set(Object.keys(obj));
+  const missing: number[] = [];
+  for (let i = 0; i < parentPairs.length; i++) {
+    if (!covered.has(String(i))) {
+      missing.push(i);
+    }
+  }
   if (missing.length > 0) {
-    throw new Error(`Decomposer R3: missing functions for: ${missing.join(", ")}`);
+    const missingInfo = missing
+      .map((i) => `[${i}] ${parentPairs[i][0]}→${parentPairs[i][1]}`)
+      .join(", ");
+    throw new Error(`Decomposer R3: missing functions for indices: ${missingInfo}`);
   }
   return pairs;
 }
@@ -369,30 +399,35 @@ function parseLeavesForSubModule(
 // ===========================================================================
 
 function stitch(
-  r2Pairs: [string, string][],       // [module, sub_module]
-  r3Pairs: [string, string][],       // [sub_module, function]
-  r4Triples: [string, string, string][], // [function, sub_function, description]
+  r2Pairs: [string, string][],          // [module, sub_module]
+  r3Pairs: [number, string][],          // [r2_index, function]
+  r4Results: Map<number, [string, string, string][]>, // r2_index → R4 triples
 ): QuotationRow[] {
-  // R3: group functions by sub_module
-  const r3Map = new Map<string, string[]>();
-  for (const [sub, func] of r3Pairs) {
-    let arr = r3Map.get(sub);
-    if (!arr) r3Map.set(sub, arr = []);
+  // R3: group functions by r2 index
+  const r3Map = new Map<number, string[]>();
+  for (const [idx, func] of r3Pairs) {
+    let arr = r3Map.get(idx);
+    if (!arr) r3Map.set(idx, arr = []);
     arr.push(func);
   }
 
-  // R4: group leaves by function
-  const r4Map = new Map<string, [string, string][]>();
-  for (const [func, subFunc, desc] of r4Triples) {
-    let arr = r4Map.get(func);
-    if (!arr) r4Map.set(func, arr = []);
-    arr.push([subFunc, desc]);
-  }
-
   const rows: QuotationRow[] = [];
-  for (const [module, sub] of r2Pairs) {           // R2: [module, sub_module]
-    for (const func of r3Map.get(sub) ?? []) {     // R3: [function]
-      for (const [subFunc, desc] of r4Map.get(func) ?? []) { // R4: [sub_func, desc]
+  for (let i = 0; i < r2Pairs.length; i++) {
+    const [module, sub] = r2Pairs[i];
+    const funcs = r3Map.get(i) ?? [];
+    // R4 lookups scoped to this sub-module's index — no cross-module collision
+    const leaves = r4Results.get(i);
+    const r4Map = new Map<string, [string, string][]>();
+    if (leaves) {
+      for (const [func, subFunc, desc] of leaves) {
+        let arr = r4Map.get(func);
+        if (!arr) r4Map.set(func, arr = []);
+        arr.push([subFunc, desc]);
+      }
+    }
+
+    for (const func of funcs) {
+      for (const [subFunc, desc] of r4Map.get(func) ?? []) {
         rows.push({
           seq: 0,
           module,
@@ -424,34 +459,36 @@ function buildR2Prompt(modules: string[], brief: string): string {
     "项目简报：",
     brief,
     "",
-    "请为每个模块拆解子模块。输出格式：{\"模块A\":[\"子1\",\"子2\"], \"模块B\":[\"子3\"]}",
+    "请为每个模块拆解子模块。",
+    "",
+    "示例 —— 假设输入模块列表：[\"门店老板版小程序\", \"运营后台\"]",
+    "则输出：{\"门店老板版小程序\":[\"首页概览\",\"订单管理\",\"发货管理\"],\"运营后台\":[\"控制台\",\"价格管理\",\"账号与权限\"]}",
+    "注意：key 必须与输入中的模块名逐字一致，不要加前缀或后缀。",
   ].join("\n");
 }
 
 function buildR3Prompt(r2Pairs: [string, string][], brief: string): string {
-  // Group sub-modules by module for context
-  const moduleMap = new Map<string, string[]>();
-  for (const [mod, sub] of r2Pairs) {
-    if (!moduleMap.has(mod)) moduleMap.set(mod, []);
-    moduleMap.get(mod)!.push(sub);
-  }
-
-  const hierarchy = [...moduleMap.entries()]
-    .map(([mod, subs]) => `  ${mod} → ${subs.join("、")}`)
+  // Build indexed list with full module → sub context
+  const indexedList = r2Pairs
+    .map(([mod, sub], i) => `  [${i}] ${mod} → ${sub}`)
     .join("\n");
 
-  // Extract unique sub-module names as JSON array for LLM reference
-  const subNames = r2Pairs.map((p) => p[1]);
-
   return [
-    "模块-子模块关系：",
-    hierarchy,
+    "模块-子模块关系（含索引）：",
+    indexedList,
     "",
     "项目简报：",
     brief,
     "",
-    `请为以下 ${subNames.length} 个子模块识别功能点。输出格式：{"子模块名":["功能1","功能2"]}`,
-    `子模块列表：${JSON.stringify(subNames)}`,
+    "请为以上每个索引（[0], [1], ...）识别功能点，以索引数字字符串为 key 输出。",
+    "",
+    "示例 —— 假设输入：",
+    "  [0] 门店老板版 → 订单管理",
+    "  [1] 推广人员版 → 订单管理",
+    "则输出：{\"0\":[\"新订单列表\",\"已成交订单\"],\"1\":[\"客户列表\",\"验机清单\"]}",
+    "注意：[0] 对应 key \"0\"，[1] 对应 key \"1\"，一一映射。",
+    "",
+    "如果不同模块下有同名子模块，每个索引对应不同的子模块，请分别为每个索引输出功能点。",
   ].join("\n");
 }
 
@@ -467,7 +504,13 @@ function buildR4PromptForSubModule(
     "项目简报：",
     brief,
     "",
-    `请为子模块"${subModule}"下的 ${funcs.length} 个功能生成子功能和描述。输出格式：{"功能名":{"子功能名":"描述",...}}`,
+    `请为子模块"${subModule}"下的 ${funcs.length} 个功能生成子功能和描述。`,
+    "",
+    "示例 —— 假设功能列表为 [\"新订单列表\", \"已成交订单\"]，",
+    "则输出：{\"新订单列表\":{\"订单卡片展示\":\"列表页每行显示订单号、客户昵称、机型、预估报价、提交时间，支持左滑操作\",\"一键确认\":\"点击确认成交按钮后弹出确认弹窗\"},\"已成交订单\":{\"成交记录\":\"按成交时间倒序展示，支持按日期筛选\"}}",
+    "注意：key 必须与功能列表中的名称逐字一致，不要加前缀或后缀。",
+    "如果是基础功能（直接写描述）：{\"系统分层方案\":\"将系统划分为展示层、网关层...\"}",
+    "",
     `功能列表：${JSON.stringify(funcs)}`,
   ].join("\n");
 }
@@ -514,8 +557,8 @@ function formatPreviousRows(rows: QuotationRow[]): string {
  * Filters previousRows to only include rows for a specific sub_module,
  * keeping the module context header. Returns empty string if no rows match.
  */
-function formatPreviousRowsForSubModule(rows: QuotationRow[], targetSubModule: string): string {
-  const filtered = rows.filter((r) => r.sub_module === targetSubModule);
+function formatPreviousRowsForSubModule(rows: QuotationRow[], targetModule: string, targetSubModule: string): string {
+  const filtered = rows.filter((r) => r.module === targetModule && r.sub_module === targetSubModule);
   if (!filtered.length) return "";
 
   const funcMap = new Map<string, [string, string][]>();
@@ -537,6 +580,84 @@ function formatPreviousRowsForSubModule(rows: QuotationRow[], targetSubModule: s
     }
   }
 
+  return lines.join("\n");
+}
+
+// ===========================================================================
+// Scoped previous-row formatters — one per hierarchy level
+// In modification rounds, each round only sees the previous result at its own
+// level, not the full 5-level tree. This prevents token waste and reduces
+// distraction: R1 doesn't need to see sub-functions; R2 doesn't need functions.
+// ===========================================================================
+
+/**
+ * R1 scoped: just the module list from the previous iteration.
+ * Output is a flat Markdown list — the LLM only sees module names.
+ */
+function formatPreviousModules(rows: QuotationRow[]): string {
+  if (!rows.length) return "";
+  const modules = [...new Set(rows.map((r) => r.module))];
+  const lines: string[] = [];
+  lines.push(`## 参考：上一次拆解结果（模块层，共 ${modules.length} 个模块）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+  for (const m of modules) lines.push(`- ${m}`);
+  return lines.join("\n");
+}
+
+/**
+ * R2 scoped: module → sub_module mapping only.
+ * No function or sub-function details — the LLM only sees the module+sub_module
+ * structure from the previous run.
+ */
+function formatPreviousSubModules(rows: QuotationRow[]): string {
+  if (!rows.length) return "";
+  const map = new Map<string, Set<string>>();
+  for (const r of rows) {
+    if (!map.has(r.module)) map.set(r.module, new Set());
+    map.get(r.module)!.add(r.sub_module);
+  }
+  const totalSubs = [...map.values()].reduce((s, v) => s + v.size, 0);
+  const lines: string[] = [];
+  lines.push(`## 参考：上一次拆解结果（子模块层，${map.size} 个模块 → ${totalSubs} 个子模块）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+  for (const [mod, subs] of map) {
+    lines.push(`### ${mod}`);
+    for (const sub of subs) lines.push(`  - ${sub}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * R3 scoped: module → sub_module → function only.
+ * The LLM sees functions but not sub-functions or descriptions from the
+ * previous run — those belong to R4.
+ */
+function formatPreviousFunctions(rows: QuotationRow[]): string {
+  if (!rows.length) return "";
+  const map = new Map<string, Map<string, Set<string>>>();
+  for (const r of rows) {
+    if (!map.has(r.module)) map.set(r.module, new Map());
+    const subMap = map.get(r.module)!;
+    if (!subMap.has(r.sub_module)) subMap.set(r.sub_module, new Set());
+    subMap.get(r.sub_module)!.add(r.function);
+  }
+  let totalFuncs = 0;
+  for (const subMap of map.values()) {
+    for (const funcs of subMap.values()) totalFuncs += funcs.size;
+  }
+  const lines: string[] = [];
+  lines.push(`## 参考：上一次拆解结果（功能层，共 ${totalFuncs} 个功能）`);
+  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
+  lines.push("");
+  for (const [mod, subMap] of map) {
+    lines.push(`### ${mod}`);
+    for (const [sub, funcs] of subMap) {
+      lines.push(`  - ${sub}`);
+      for (const func of funcs) lines.push(`    - ${func}`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -565,6 +686,7 @@ async function invokeR4ForSubModule(
     (raw) => parseLeavesForSubModule(raw, subModule, funcs),
     instructions,
     previousRowsContext,
+    3, // R4 content is longest, needs one extra retry
   );
 }
 
@@ -577,7 +699,13 @@ export async function runDecomposer(
   sessionId: string,
   input: {
     structuredBrief: string;
-    instructions?: string;
+    /** Per-round instructions. Only rounds that need modification need a key. */
+    roundInstructions?: {
+      r1?: string;
+      r2?: string;
+      r3?: string;
+      r4?: string;
+    };
     previousRows?: QuotationRow[];
   },
   onProgress?: (progress: DecomposerProgress) => void,
@@ -587,15 +715,24 @@ export async function runDecomposer(
     throw new Error("Decomposer: structuredBrief is empty");
   }
 
-  const instructions = input.instructions;
-  const previousRowsContext = input.previousRows?.length
-    ? formatPreviousRows(input.previousRows)
+  const ri = input.roundInstructions;
+
+  // Scoped previousRows context — each round only sees its own level
+  const r1PrevContext = input.previousRows?.length
+    ? formatPreviousModules(input.previousRows)
     : undefined;
+  const r2PrevContext = input.previousRows?.length
+    ? formatPreviousSubModules(input.previousRows)
+    : undefined;
+  const r3PrevContext = input.previousRows?.length
+    ? formatPreviousFunctions(input.previousRows)
+    : undefined;
+  // R4 is already scoped per sub-module via formatPreviousRowsForSubModule
 
   logger.info("decomposer start (BFS)", {
     briefLen: brief.length,
-    hasInstructions: !!instructions,
-    hasPreviousRows: !!previousRowsContext,
+    hasRoundInstructions: !!ri,
+    hasPreviousRows: !!input.previousRows?.length,
   });
 
   const overrides = getSessionConfig(sessionId)?.promptOverrides;
@@ -612,8 +749,8 @@ export async function runDecomposer(
     r1Prompt,
     `项目简报：\n\n${brief}\n\n请列出所有一级模块。输出格式：["模块A", "模块B"]`,
     parseModules,
-    instructions,
-    previousRowsContext,
+    ri?.r1,
+    r1PrevContext,
   );
   onProgress?.({ stage: "识别产品模块", round: 1, totalRounds: 4, message: `已识别 ${modules.length} 个模块` });
 
@@ -625,8 +762,8 @@ export async function runDecomposer(
     r2Prompt,
     buildR2Prompt(modules, brief),
     (raw) => parseSubModules(raw, modules),
-    instructions,
-    previousRowsContext,
+    ri?.r2,
+    r2PrevContext,
   );
   const subModules = r2Pairs;
   onProgress?.({ stage: "拆解子模块", round: 2, totalRounds: 4, message: `已拆解 ${r2Pairs.length} 个子模块` });
@@ -639,8 +776,8 @@ export async function runDecomposer(
     r3Prompt,
     buildR3Prompt(r2Pairs, brief),
     (raw) => parseFunctions(raw, r2Pairs),
-    instructions,
-    previousRowsContext,
+    ri?.r3,
+    r3PrevContext,
   );
   onProgress?.({ stage: "识别功能点", round: 3, totalRounds: 4, message: `已识别 ${r3Pairs.length} 个功能点` });
 
@@ -649,46 +786,46 @@ export async function runDecomposer(
   // This avoids token limit issues on large projects and enables parallel execution.
   onProgress?.({ stage: "生成子功能详情", round: 3, totalRounds: 4, message: "正在生成子功能详情..." });
 
-  // Build sub_module → (module, functions) index
-  const subToModule = new Map<string, string>();
-  for (const [mod, sub] of r2Pairs) subToModule.set(sub, mod);
-
-  const subsFuncs = new Map<string, { module: string; funcs: string[] }>();
-  for (const [sub, func] of r3Pairs) {
-    let entry = subsFuncs.get(sub);
+  // Group functions by r2 index for per-sub_module R4 calls
+  const subsFuncs = new Map<number, { module: string; subModule: string; funcs: string[] }>();
+  for (const [idx, func] of r3Pairs) {
+    let entry = subsFuncs.get(idx);
     if (!entry) {
-      entry = { module: subToModule.get(sub)!, funcs: [] };
-      subsFuncs.set(sub, entry);
+      const [mod, sub] = r2Pairs[idx];
+      entry = { module: mod, subModule: sub, funcs: [] };
+      subsFuncs.set(idx, entry);
     }
     entry.funcs.push(func);
   }
 
-  // Fire parallel R4 calls — one per sub-module
-  const subResults = await Promise.all(
-    [...subsFuncs.entries()].map(([subModule, { module, funcs }]) => {
-      const filteredPrevRows = input.previousRows?.length
-        ? formatPreviousRowsForSubModule(input.previousRows, subModule)
-        : undefined;
-      return invokeR4ForSubModule(
-        model,
-        "decomposer_r4",
-        r4Prompt,
-        module,
-        subModule,
-        funcs,
-        brief,
-        instructions,
-        filteredPrevRows,
-      );
-    }),
-  );
+  // Fire parallel R4 calls — one per sub-module, preserving r2 index
+  const r4Results = new Map<number, [string, string, string][]>();
+  const r4Instructions = ri?.r4;
+  const r4Promises = [...subsFuncs.entries()].map(async ([idx, { module, subModule, funcs }]) => {
+    const filteredPrevRows = input.previousRows?.length
+      ? formatPreviousRowsForSubModule(input.previousRows, module, subModule)
+      : undefined;
+    const triples = await invokeR4ForSubModule(
+      model,
+      "decomposer_r4",
+      r4Prompt,
+      module,
+      subModule,
+      funcs,
+      brief,
+      r4Instructions,
+      filteredPrevRows,
+    );
+    r4Results.set(idx, triples);
+  });
+  await Promise.all(r4Promises);
 
-  // Flatten all sub-module results into single triple array
-  const r4Triples: [string, string, string][] = subResults.flat();
-  onProgress?.({ stage: "生成子功能详情", round: 4, totalRounds: 4, message: `已生成 ${r4Triples.length} 个子功能（${subsFuncs.size} 块并行）` });
+  // Count total leaves
+  const r4TriplesCount = [...r4Results.values()].reduce((sum, t) => sum + t.length, 0);
+  onProgress?.({ stage: "生成子功能详情", round: 4, totalRounds: 4, message: `已生成 ${r4TriplesCount} 个子功能（${subsFuncs.size} 块并行）` });
 
   // ── Stitch: reconstruct QuotationRow[] from the forward-reference chain ──
-  const rows = stitch(r2Pairs, r3Pairs, r4Triples);
+  const rows = stitch(r2Pairs, r3Pairs, r4Results);
 
   logger.info("decomposer complete (BFS)", {
     modules: modules.length,

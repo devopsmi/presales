@@ -1,11 +1,43 @@
 /**
  * Structured logger with level filtering, request tracing, and context support.
  *
- * - Development: colorized pretty output to stdout
- * - Production: newline-delimited JSON to stdout
+ * - Development: colorized pretty output to stdout + file
+ * - Production: newline-delimited JSON to stdout + file
+ * - File output: logs/session-{timestamp}.log (one file per process start)
  * - Filter by LOG_LEVEL env var (debug < info < warn < error)
  * - Use `logger.child(ctx)` to create contextual sub-loggers
  */
+
+let writeToFile: (line: string) => void = () => { };
+
+// Server-only: initialize file logging using Node.js fs module.
+// Guarded with typeof window to avoid bundling node:fs into client bundles.
+if (typeof window === "undefined") {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeFs: typeof import("node:fs") = require("node:fs");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodePath: typeof import("node:path") = require("node:path");
+
+  const logsDir = nodePath.resolve(process.cwd(), "log");
+  if (!nodeFs.existsSync(logsDir)) {
+    nodeFs.mkdirSync(logsDir, { recursive: true });
+  }
+
+  const sessionTimestamp = new Date()
+    .toISOString()
+    .replace(/:/g, "-")
+    .replace(/\..+/, "");
+  const filePath = nodePath.join(logsDir, `session-${sessionTimestamp}.log`);
+
+  const fileStream = nodeFs.createWriteStream(filePath, { flags: "a" });
+  fileStream.on("error", (err) => {
+    process.stderr.write(`[logger] Failed to write to ${filePath}: ${err.message}\n`);
+  });
+
+  writeToFile = (line: string) => {
+    fileStream.write(line + "\n");
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -145,6 +177,7 @@ function createInternalLogger(context: string, requestId?: string): Logger {
     if (!isLevelEnabled(level, threshold)) return;
     const entry = buildEntry(level, message, data);
     writer.write(formatter(entry) + "\n");
+    writeToFile(formatJson(entry));
   }
 
   const self: Logger = {
@@ -152,13 +185,13 @@ function createInternalLogger(context: string, requestId?: string): Logger {
     info: (msg, data) => log("info", msg, data),
     warn: (msg, data) => log("warn", msg, data),
     error: (msg, data) => {
-      // Extract Error from data if present for structured error logging
       const errorObj = data?.error instanceof Error ? data.error : undefined;
       const cleanData = data ? { ...data } : undefined;
       if (errorObj && cleanData) delete (cleanData as Record<string, unknown>).error;
       if (!isLevelEnabled("error", threshold)) return;
       const entry = buildEntry("error", msg, cleanData, errorObj);
       writer.write(formatter(entry) + "\n");
+      writeToFile(formatJson(entry));
     },
     child: (ctx: Record<string, string>) => {
       const merged = Object.entries(ctx)

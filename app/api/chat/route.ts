@@ -90,6 +90,7 @@ function mapToolName(raw: string): string {
     grill_me: "grill_me",
     decompose: "subagent_decomposer",
     estimate_hours: "subagent_estimator",
+    evaluate: "subagent_evaluator",
   };
   return m[raw] || raw;
 }
@@ -230,12 +231,28 @@ export async function POST(req: Request) {
                     typeof call.input === "string" ? call.input : JSON.stringify(call.input),
                 });
 
-                const output = await call.output;
-                if (output) {
+                // Wrap in try/catch so tool errors don't break the SSE stream.
+                // The agent may retry the tool after receiving the error feedback,
+                // and the stream must stay open for the frontend to see the retry results.
+                try {
+                  const output = await call.output;
+                  if (output) {
+                    send({
+                      type: "tool-output-available",
+                      toolCallId,
+                      output: typeof output === "string" ? output : JSON.stringify(output),
+                    });
+                  }
+                } catch (toolErr) {
+                  const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+                  log.warn("tool call failed (stream stays open for retry)", {
+                    toolName: call.name,
+                    error: errMsg,
+                  });
                   send({
                     type: "tool-output-available",
                     toolCallId,
-                    output: typeof output === "string" ? output : JSON.stringify(output),
+                    output: JSON.stringify({ status: "error", message: errMsg }),
                   });
                 }
               }

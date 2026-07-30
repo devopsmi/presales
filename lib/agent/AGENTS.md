@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-LangChain-based agent pipeline implementing master-slave architecture. One master agent (6 tools) coordinates 3 sub-agents in a strict dispatch chain: FileParser → Decomposer → Estimator.
+LangChain-based agent pipeline implementing master-slave architecture. One master agent (6 tools) coordinates 4 sub-agents in a strict dispatch chain: FileParser → Decomposer → Evaluator → Estimator.
 
 ## STRUCTURE
 
@@ -14,6 +14,7 @@ lib/agent/
 ├── sub-agents/
 │   ├── file-parser.ts     # Parse attachments (PDF/Word/Excel) → text
 │   ├── decomposer.ts      # BFS tree decomposition → QuotationRow[]
+│   ├── evaluator.ts       # Fidelity check: decomposition vs brief
 │   └── estimator.ts       # Fill per-trade man-day estimates
 ├── tools/
 │   └── file-parser.ts     # File parsing tool implementations
@@ -25,14 +26,15 @@ lib/agent/
 ## DISPATCH CHAIN
 
 ```
-parse_files → query_file → grill_me → decompose → estimate_hours
+parse_files → query_file → grill_me → decompose → evaluate → estimate_hours
 ```
 
 **Hard constraints:**
 - `decompose` only after parse_files has auto-generated structuredBrief
-- `estimate_hours` only after `decompose`
+- `evaluate` only after `decompose`
+- `estimate_hours` only after `evaluate` has passed
 - `grill_me` before decompose for requirement clarification; can also run after for final completeness check
-- Stage enforced by `PipelineStage` enum: `idle → parsed → decomposed → estimated`
+- Stage enforced by `PipelineStage` enum: `idle → parsed → decomposed → evaluated → estimated`
 
 ## SESSION ARCHITECTURE
 
