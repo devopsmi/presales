@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Evaluator Log Viewer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #09090b;           /* shadcn background */
+    --bg-card: #18181b;       /* shadcn card */
+    --bg-muted: #27272a;      /* shadcn muted */
+    --bg-muted-10: rgba(39,39,42,.1);
+    --bg-muted-30: rgba(39,39,42,.3);
+    --border: #27272a;        /* shadcn border */
+    --text: #fafafa;          /* shadcn foreground */
+    --text-dim: #a1a1aa;      /* shadcn muted-foreground */
+    --accent: #3b82f6;
+    --accent-dim: rgba(59,130,246,.15);
+    --green: #22c55e;
+    --green-dim: rgba(34,197,94,.15);
+    --purple: #a855f7;
+    --purple-dim: rgba(168,85,247,.15);
+    --orange: #f97316;
+    --orange-dim: rgba(249,115,22,.15);
+    --radius: 8px;
+    --radius-sm: 6px;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.5;
+    font-size: 14px;
+  }
+  .container { max-width: 1800px; margin: 0 auto; padding: 32px 24px; }
+
+  /* ── Header ── */
+  .app-header { margin-bottom: 28px; }
+  .app-header h1 { font-size: 22px; font-weight: 600; }
+  .app-header h1 span { color: var(--text-dim); font-weight: 400; font-size: 15px; margin-left: 8px; }
+
+  /* ── Upload Zone ── */
+  .upload-zone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 44px 24px; text-align: center; cursor: pointer;
+    transition: border-color .2s, background .2s; margin-bottom: 28px;
+  }
+  .upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); background: var(--bg-card); }
+  .upload-zone .upload-info { margin-top: 10px; font-size: 14px; color: var(--text-dim); }
+  .upload-zone .upload-info strong { color: var(--green); }
+  .upload-zone .upload-info .action { color: var(--accent); font-size: 12px; display: block; margin-top: 4px; }
+  .upload-zone input { display: none; }
+
+  /* ── Global Stats ── */
+  .stats-bar {
+    display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 24px;
+    padding: 14px 20px; background: var(--bg-card); border-radius: var(--radius);
+    border: 1px solid var(--border);
+  }
+  .stat-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); }
+  .stat-value { font-weight: 600; color: var(--text); }
+  .stat-value.green { color: var(--green); }
+  .stat-value.accent { color: var(--accent); }
+
+  /* ── Global Controls ── */
+  .controls {
+    display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; align-items: center;
+  }
+  .controls input, .controls select {
+    background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 9px 12px; font-size: 13px; outline: none;
+    transition: border-color .15s;
+  }
+  .controls input:focus, .controls select:focus { border-color: var(--accent); }
+  .controls input { flex: 1; min-width: 260px; }
+  .controls select { min-width: 150px; }
+
+  .btn {
+    background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 9px 16px; font-size: 13px; cursor: pointer;
+    white-space: nowrap; transition: background .15s, border-color .15s;
+  }
+  .btn:hover { background: var(--bg-muted); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary:hover { opacity: .9; }
+  .btn.success { background: var(--green); color: #fff; border-color: var(--green); }
+  .btn.success:hover { opacity: .9; }
+
+  .filter-count { color: var(--text-dim); font-size: 13px; margin-left: auto; }
+
+  /* ── Entry Card ── */
+  .entry-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 20px; overflow: hidden;
+  }
+  .entry-card-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; cursor: pointer; user-select: none;
+    transition: background .15s;
+    border-bottom: 1px solid transparent;
+  }
+  .entry-card-header:hover { background: var(--bg-muted); }
+  .entry-card.expanded .entry-card-header { border-bottom-color: var(--border); }
+
+  .entry-badge { font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 10px; }
+  .entry-badge.matched { background: var(--green-dim); color: var(--green); }
+  .entry-badge.model  { background: var(--accent-dim); color: var(--accent); }
+
+  .entry-meta { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .entry-meta .sep { color: var(--border); }
+  .entry-ts { font-family: 'SF Mono', 'Cascadia Code', monospace; }
+
+  .entry-toggle {
+    margin-left: auto; font-size: 12px; color: var(--text-dim);
+    transition: transform .2s; flex-shrink: 0;
+  }
+  .entry-card.expanded .entry-toggle { transform: rotate(180deg); }
+
+  /* ── Table Container ── */
+  .table-container {
+    display: none; overflow-x: auto;
+    /* shadcn style: not rounded inside card */
+  }
+  .entry-card.expanded .table-container { display: block; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+  /* shadcn TableRow */
+  tr { border-bottom: 1px solid var(--border); }
+  tr:last-child { border-bottom: 0; }
+  tr:hover td { background: rgba(39,39,42,.35); }
+
+  /* shadcn TableHead */
+  th {
+    height: 40px; padding: 0 12px; text-align: left; vertical-align: middle;
+    white-space: nowrap; font-weight: 600; font-size: 12px; color: var(--text-dim);
+    background: var(--bg); text-transform: uppercase; letter-spacing: .04em;
+    cursor: pointer; user-select: none; position: sticky; top: 0; z-index: 2;
+    border-bottom: 2px solid var(--border);
+  }
+  th:first-child { padding-left: 16px; }
+  th:last-child { padding-right: 16px; }
+  th:hover { color: var(--text); }
+  th.sorted { color: var(--accent); }
+  th .sort-arrow { margin-left: 3px; font-size: 10px; }
+
+  /* shadcn TableCell */
+  td {
+    padding: 8px 12px; vertical-align: middle; white-space: nowrap;
+  }
+  td:first-child { padding-left: 16px; }
+  td:last-child { padding-right: 16px; }
+
+  /* Column widths */
+  .col-seq { width: 56px; text-align: center; font-family: 'SF Mono', 'Cascadia Code', monospace; color: var(--text-dim); font-size: 12px; }
+  .col-cat { width: 72px; }
+  .col-module, .col-sub, .col-func { min-width: 100px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .col-desc { min-width: 180px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+  .col-desc:hover { overflow: visible; }
+
+  /* shadcn QuotationTable merged cell backgrounds */
+  td.merged-0 { background: rgba(39,39,42,.30); } /* bg-muted/30 */
+  td.merged-1 { background: rgba(39,39,42,.15); } /* bg-muted/10 */
+  td.merged-2 { background: transparent; }
+
+  /* Category tag */
+  .cat-tag {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 500;
+  }
+  .tag-feature { background: var(--accent-dim); color: var(--accent); }
+  .tag-nonfunc { background: var(--purple-dim); color: var(--purple); }
+  .tag-api    { background: var(--orange-dim); color: var(--orange); }
+  .tag-unknown { background: var(--bg-muted); color: var(--text-dim); }
+
+  /* ── Empty State ── */
+  .no-data {
+    text-align: center; padding: 64px 24px; color: var(--text-dim);
+  }
+  .no-data .icon { font-size: 36px; margin-bottom: 12px; opacity: .25; }
+
+  /* ── Tooltip ── */
+  [title] { position: relative; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+</head>
+<body>
+<div class="container">
+  <div class="app-header">
+    <h1>Evaluator Log Viewer<span>— 自动解析 evaluator 匹配结果，5级层次表格展示</span></h1>
+  </div>
+
+  <!-- Upload Zone -->
+  <div class="upload-zone" id="uploadZone">
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.35">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+    <div class="upload-info" id="uploadInfo">拖拽日志文件到此处，或点击选择 (.log / .txt / .jsonl)</div>
+    <input type="file" id="fileInput" accept=".log,.txt,.json,.jsonl">
+  </div>
+
+  <!-- Global Stats -->
+  <div class="stats-bar" id="statsBar" style="display:none;"></div>
+
+  <!-- Global Controls -->
+  <div class="controls" id="controls" style="display:none;">
+    <input type="text" id="searchInput" placeholder="搜索（序号 / 分类 / 模块名 / 描述 ...）">
+    <select id="catFilter">
+      <option value="">所有分类</option>
+    </select>
+    <select id="entryFilter"><option value="">所有条目</option></select>
+    <button class="btn primary" id="expandAllBtn">展开全部</button>
+    <button class="btn" id="collapseAllBtn">收起全部</button>
+    <button class="btn success" id="exportAllBtn">导出全部 XLSX</button>
+    <span class="filter-count" id="filterCount"></span>
+  </div>
+
+  <!-- Tables Container -->
+  <div id="tablesContainer">
+    <div class="no-data" id="noData">
+      <div class="icon">📋</div>
+      <div>等待日志文件...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──
+let allEntries = [];
+// allEntries[i] = { ts, model, matched, totalRows, note, rows: [{seq, cat, l0, l1, l2, desc}, ...] }
+
+// ── Row Parser ──
+// "seq-1 | [功能] C端微信小程序 → 附近门店 → 附近门店列表 → 自动定位与距离排序"
+const ROW_RE = /^seq-(\d+)\s*\|\s*\[(.+?)\]\s+(.+)$/;
+function parseRow(raw) {
+  const m = raw.match(ROW_RE);
+  if (!m) return null;
+  const seq = parseInt(m[1], 10);
+  const cat = m[2];
+  const rest = m[3];
+  // Split by → to get hierarchy levels
+  const parts = rest.split(/\s*→\s*/);
+  const desc = parts.pop() || '';                     // last part = description
+  const l0 = parts.length > 0 ? parts[0] : '';        // module
+  const l1 = parts.length > 1 ? parts[1] : '';        // sub_module
+  const l2 = parts.length > 2 ? parts[2] : '';        // function
+  return { seq, cat, l0, l1, l2, desc };
+}
+
+// ── File Processing ──
+function processFile(text) {
+  allEntries = [];
+  const lines = text.split('\n');
+  let parsed = 0, skipped = 0, totalLines = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    totalLines++;
+    try {
+      const obj = JSON.parse(trimmed);
+      const data = obj.data;
+      if (!data || data.agent !== 'evaluator') { skipped++; continue; }
+
+      let input;
+      try {
+        input = typeof data.input === 'string' ? JSON.parse(data.input) : data.input;
+      } catch { skipped++; continue; }
+
+      // Only matched === totalRows
+      if (input.matched !== input.totalRows) { skipped++; continue; }
+
+      const rows = (input.rows || []).map(parseRow).filter(Boolean);
+      rows.sort((a, b) => a.seq - b.seq);
+
+      if (rows.length === 0) { skipped++; continue; }
+
+      allEntries.push({
+        ts: obj.ts,
+        model: data.model || 'unknown',
+        matched: input.matched,
+        totalRows: input.totalRows,
+        note: input.note || '',
+        rows
+      });
+      parsed++;
+    } catch { skipped++; }
+  }
+
+  return { parsed, skipped, total: totalLines };
+}
+
+// ── RowSpan Computation (shadcn QuotationTable pattern) ──
+function computeSpans(rows) {
+  const n = rows.length;
+  const spans = new Array(n).fill(null).map(() => ({ l0: 0, l1: 0, l2: 0 }));
+  const fields = ['l0', 'l1', 'l2'];
+
+  for (const field of fields) {
+    let start = 0;
+    for (let i = 1; i <= n; i++) {
+      const groupEnd = i === n || rows[i][field] !== rows[start][field];
+      if (groupEnd) {
+        spans[start][field] = i - start;
+        start = i;
+      }
+    }
+  }
+  return spans;
+}
+
+// ── Category Tag HTML ──
+function catTag(cat) {
+  let cls;
+  if (cat === '功能') cls = 'tag-feature';
+  else if (cat === '非功能') cls = 'tag-nonfunc';
+  else if (cat === '接口' || /API|接口/i.test(cat)) cls = 'tag-api';
+  else cls = 'tag-unknown';
+  return `<span class="cat-tag ${cls}">${cat}</span>`;
+}
+
+// ── Render All ──
+function render() {
+  const statsBar = document.getElementById('statsBar');
+  const controls = document.getElementById('controls');
+  const noData = document.getElementById('noData');
+  const tablesContainer = document.getElementById('tablesContainer');
+
+  if (!allEntries.length) {
+    statsBar.style.display = 'none';
+    controls.style.display = 'none';
+    noData.style.display = '';
+    tablesContainer.innerHTML = '';
+    tablesContainer.appendChild(noData);
+    return;
+  }
+  noData.style.display = 'none';
+
+  // Stats
+  const totalRows = allEntries.reduce((s, e) => s + e.rows.length, 0);
+  const models = [...new Set(allEntries.map(e => e.model))].join(', ');
+  const categories = [...new Set(allEntries.flatMap(e => e.rows.map(r => r.cat)))];
+  statsBar.style.display = 'flex';
+  statsBar.innerHTML = `
+    <div class="stat-item">📋 匹配条目数<span class="stat-value green">${allEntries.length}</span></div>
+    <div class="stat-item">📄 功能点总数<span class="stat-value accent">${totalRows}</span></div>
+    <div class="stat-item">🤖 模型<span class="stat-value">${models || '-'}</span></div>
+    <div class="stat-item">🏷 分类<span class="stat-value">${categories.join(', ') || '-'}</span></div>
+  `;
+
+  controls.style.display = 'flex';
+
+  // Category filter options
+  const catFilter = document.getElementById('catFilter');
+  const savedCat = catFilter.value;
+  catFilter.innerHTML = '<option value="">所有分类</option>';
+  categories.forEach(c => { catFilter.innerHTML += `<option value="${c}">${c}</option>`; });
+  catFilter.value = savedCat;
+
+  // Entry filter options
+  const entryFilter = document.getElementById('entryFilter');
+  const savedEntry = entryFilter.value;
+  entryFilter.innerHTML = '<option value="">所有条目</option>';
+  allEntries.forEach((e, i) => {
+    const label = `#${i + 1} ${e.ts ? new Date(e.ts).toLocaleString('zh-CN') : '-'} (${e.rows.length} 行)`;
+    entryFilter.innerHTML += `<option value="${i}">${label}</option>`;
+  });
+  entryFilter.value = savedEntry;
+
+  // Build tables
+  buildTables();
+}
+
+// ── Build All Entry Tables ──
+function buildTables() {
+  const container = document.getElementById('tablesContainer');
+  const search = document.getElementById('searchInput').value.toLowerCase();
+  const catFilter = document.getElementById('catFilter').value;
+  const entryFilter = document.getElementById('entryFilter').value;
+
+  // Determine which entries to show
+  let entriesToShow = allEntries;
+  if (entryFilter !== '') {
+    const e = allEntries[parseInt(entryFilter)];
+    entriesToShow = e ? [e] : [];
+  }
+
+  let totalVisible = 0;
+  let html = '';
+
+  entriesToShow.forEach((entry, entryIdx) => {
+    // Apply global search and category filter to rows
+    let rows = entry.rows;
+    if (search || catFilter) {
+      rows = rows.filter(r => {
+        if (catFilter && r.cat !== catFilter) return false;
+        if (search) {
+          return String(r.seq).includes(search) ||
+            r.cat.includes(search) ||
+            r.l0.toLowerCase().includes(search) ||
+            r.l1.toLowerCase().includes(search) ||
+            r.l2.toLowerCase().includes(search) ||
+            r.desc.toLowerCase().includes(search);
+        }
+        return true;
+      });
+    }
+    if (rows.length === 0) return;
+
+    totalVisible += rows.length;
+    const cardId = `entry-card-${entryIdx}`;
+
+    html += `
+      <div class="entry-card" id="${cardId}" data-entry="${entryIdx}">
+        <div class="entry-card-header" onclick="toggleCard('${cardId}')">
+          <span class="entry-badge matched">✓ ${entry.matched}/${entry.totalRows}</span>
+          <span class="entry-badge model">${entry.model}</span>
+          <span class="entry-meta">
+            <span class="entry-ts">${entry.ts ? new Date(entry.ts).toLocaleString('zh-CN') : '-'}</span>
+            <span class="sep">|</span>
+            <span>${entry.rows.length} 功能点</span>
+            ${entry.note ? `<span class="sep">|</span><span>${entry.note.substring(0, 40)}...</span>` : ''}
+          </span>
+          <span class="entry-toggle">▼</span>
+        </div>
+        <div class="table-container">
+          ${buildTable(rows, cardId)}
+          <div style="padding:10px 16px;display:flex;gap:8px;">
+            <button class="btn" onclick="exportEntryXlsx(${entryIdx})" style="font-size:12px;">导出此表 XLSX</button>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  // No-data fallback
+  if (!html) {
+    container.innerHTML = `<div class="no-data"><div class="icon">🔍</div><div>无匹配记录</div></div>`;
+  } else {
+    container.innerHTML = html;
+    // Auto-expand if only one entry
+    if (entriesToShow.length <= 3) {
+      entriesToShow.forEach((_, i) => {
+        const card = document.getElementById(`entry-card-${i}`);
+        if (card) card.classList.add('expanded');
+      });
+    }
+  }
+
+  document.getElementById('filterCount').textContent = `显示 ${totalVisible} 条`;
+}
+
+// ── Build Single Table (QuotationTable pattern) ──
+function buildTable(rows, cardId) {
+  const spans = computeSpans(rows);
+  // Which hierarchical columns have any data?
+  const hasL0 = rows.some(r => r.l0);
+  const hasL1 = rows.some(r => r.l1);
+  const hasL2 = rows.some(r => r.l2);
+
+  // Decide visible columns
+  let cols = [];
+  cols.push({ id: 'seq', label: '序号', cls: 'col-seq', sortable: true });
+  cols.push({ id: 'cat', label: '分类', cls: 'col-cat', sortable: true });
+  if (hasL0) cols.push({ id: 'l0', label: '模块', cls: 'col-module', sortable: true });
+  if (hasL1) cols.push({ id: 'l1', label: '子模块', cls: 'col-sub', sortable: true });
+  if (hasL2) cols.push({ id: 'l2', label: '功能', cls: 'col-func', sortable: true });
+  cols.push({ id: 'desc', label: '功能描述', cls: 'col-desc', sortable: false });
+
+  // Map hierarchical column to merge index (0=l0, 1=l1, 2=l2)
+  const mergeFields = ['l0', 'l1', 'l2'].filter(f => cols.some(c => c.id === f));
+
+  let tableHtml = '<table>';
+  // Header
+  tableHtml += '<thead><tr>';
+  cols.forEach(c => {
+    tableHtml += `<th class="${c.cls}" onclick="event.stopPropagation();sortTable('${cardId}', '${c.id}')" data-col="${c.id}">${c.label}</th>`;
+  });
+  tableHtml += '</tr></thead><tbody>';
+
+  // Body with rowSpan merging
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const sp = spans[i];
+
+    tableHtml += '<tr>';
+    for (let ci = 0; ci < cols.length; ci++) {
+      const col = cols[ci];
+      if (col.id === 'seq') {
+        tableHtml += `<td class="col-seq">${r.seq}</td>`;
+      } else if (col.id === 'cat') {
+        tableHtml += `<td class="col-cat">${catTag(r.cat)}</td>`;
+      } else if (col.id === 'desc') {
+        tableHtml += `<td class="col-desc" title="${escapeHtml(r.desc)}">${escapeHtml(r.desc)}</td>`;
+      } else {
+        // Hierarchical column (l0, l1, l2)
+        const fi = mergeFields.indexOf(col.id);
+        const cellVal = escapeHtml(r[col.id] || '-');
+        if (fi >= 0 && sp[col.id] > 0) {
+          tableHtml += `<td class="${col.cls} merged-${fi}" rowspan="${sp[col.id]}">${cellVal}</td>`;
+        } else if (fi >= 0 && sp[col.id] === 0) {
+          // hidden by rowSpan - skip
+        } else {
+          tableHtml += `<td class="${col.cls}">${cellVal}</td>`;
+        }
+      }
+    }
+    tableHtml += '</tr>';
+  }
+
+  tableHtml += '</tbody></table>';
+  return tableHtml;
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+// ── Card Expand/Collapse ──
+function toggleCard(cardId) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  card.classList.toggle('expanded');
+}
+
+function expandAll() {
+  document.querySelectorAll('.entry-card').forEach(c => c.classList.add('expanded'));
+}
+function collapseAll() {
+  document.querySelectorAll('.entry-card').forEach(c => c.classList.remove('expanded'));
+}
+
+// ── In-Table Sort (per entry) ──
+let tableSortState = {}; // { cardId: { key, dir } }
+function sortTable(cardId, key) {
+  if (!tableSortState[cardId] || tableSortState[cardId].key !== key) {
+    tableSortState[cardId] = { key, dir: 1 };
+  } else {
+    tableSortState[cardId].dir *= -1;
+  }
+  rebuildSingleTable(cardId);
+}
+
+function rebuildSingleTable(cardId) {
+  const entryIdx = parseInt(cardId.replace('entry-card-', ''), 10);
+  const entry = allEntries[entryIdx];
+  if (!entry) return;
+
+  const search = document.getElementById('searchInput').value.toLowerCase();
+  const catFilter = document.getElementById('catFilter').value;
+  let rows = entry.rows;
+  if (search || catFilter) {
+    rows = rows.filter(r => {
+      if (catFilter && r.cat !== catFilter) return false;
+      if (search) {
+        return String(r.seq).includes(search) ||
+          r.cat.includes(search) ||
+          r.l0.toLowerCase().includes(search) ||
+          r.l1.toLowerCase().includes(search) ||
+          r.l2.toLowerCase().includes(search) ||
+          r.desc.toLowerCase().includes(search);
+      }
+      return true;
+    });
+  }
+
+  // Sort
+  const state = tableSortState[cardId];
+  if (state) {
+    const { key, dir } = state;
+    rows.sort((a, b) => {
+      let va = a[key], vb = b[key];
+      if (key === 'seq') return (va - vb) * dir;
+      return String(va || '').localeCompare(String(vb || ''), 'zh-CN') * dir;
+    });
+  }
+
+  const card = document.getElementById(cardId);
+  const tableContainer = card.querySelector('.table-container');
+  // rebuild (keep the export button at the end)
+  tableContainer.innerHTML = buildTable(rows, cardId) + tableContainer.querySelector('div').outerHTML;
+}
+
+// ── XLSX Export (matching lib/xlsx-generator.ts style) ──
+// xlsx-js-style requires cell styles embedded in {v, t, s} objects passed
+// to aoa_to_sheet — ws["A1"].s = {...} is a KNOWN BROKEN pattern in this lib.
+
+const XLSX_FONT = '微软雅黑';
+const XLSX_HEADER_BG = 'BDD7EE';  // light blue, matching project HEADER_BG = "FFBDD7EE"
+const XLSX_BORDER_STYLE = 'thin';
+
+function xlsxFont(bold) { return { name: XLSX_FONT, sz: 12, bold: !!bold }; }
+function xlsxTitleFont()  { return { name: XLSX_FONT, sz: 18, bold: true }; }
+function xlsxCenter()     { return { horizontal: 'center', vertical: 'middle', wrapText: true }; }
+function xlsxLeft()       { return { horizontal: 'left',   vertical: 'middle', wrapText: true }; }
+function xlsxBorder() {
+  return {
+    top: { style: XLSX_BORDER_STYLE, color: { rgb: '000000' } },
+    left: { style: XLSX_BORDER_STYLE, color: { rgb: '000000' } },
+    bottom: { style: XLSX_BORDER_STYLE, color: { rgb: '000000' } },
+    right: { style: XLSX_BORDER_STYLE, color: { rgb: '000000' } },
+  };
+}
+
+/** Build hierarchical column list from rows. */
+function xlsxCols(rows) {
+  const hasL0 = rows.some(r => r.l0);
+  const hasL1 = rows.some(r => r.l1);
+  const hasL2 = rows.some(r => r.l2);
+  const cols = [];
+  cols.push({ id: 'seq',  label: '序号',   w: 7 });
+  cols.push({ id: 'cat',  label: '分类',   w: 10 });
+  if (hasL0) cols.push({ id: 'l0',  label: '模块',   w: 18 });
+  if (hasL1) cols.push({ id: 'l1',  label: '子模块',  w: 18 });
+  if (hasL2) cols.push({ id: 'l2',  label: '功能',   w: 25 });
+  cols.push({ id: 'desc', label: '功能描述', w: 60 });
+  return cols;
+}
+
+/** Build a 2D array of {v, t, s} cell objects for aoa_to_sheet. */
+function buildSheetData(entry, sheetLabel) {
+  const rows = entry.rows;
+  const cols = xlsxCols(rows);
+  const nCols = cols.length;
+  const nRows = rows.length;
+  const spans = computeSpans(rows);
+  const mergeFields = ['l0', 'l1', 'l2'].filter(f => cols.some(c => c.id === f));
+
+  // Helper: produce a row of nCols styled cells
+  function makeS(v, s) { return { t: typeof v === 'number' ? 'n' : 's', v: String(v), s: s }; }
+  function makeBlank(s) { return makeS('', s); }
+  function styledRow(values, style) {
+    const r = new Array(nCols);
+    for (let ci = 0; ci < nCols; ci++) {
+      r[ci] = ci < values.length ? makeS(values[ci], style) : makeS('', {});
+    }
+    return r;
+  }
+
+  const aoa = [];
+
+  // ── Row 0 — Title (all cols merged) ──
+  const titleRow = new Array(nCols);
+  titleRow[0] = makeS(sheetLabel, { font: xlsxTitleFont(), alignment: { horizontal: 'center', vertical: 'middle' } });
+  for (let c = 1; c < nCols; c++) titleRow[c] = makeBlank({});
+  aoa.push(titleRow);
+
+  // ── Row 1 — Meta info (all cols merged) ──
+  const tsStr = entry.ts ? new Date(entry.ts).toLocaleString('zh-CN') : '-';
+  const metaText = `模型: ${entry.model}   时间: ${tsStr}   匹配: ${entry.matched}/${entry.totalRows}`;
+  const metaRow = new Array(nCols);
+  metaRow[0] = makeS(metaText, { font: xlsxFont(false), alignment: { horizontal: 'left', vertical: 'middle' } });
+  for (let c = 1; c < nCols; c++) metaRow[c] = makeBlank({});
+  aoa.push(metaRow);
+
+  // ── Row 2 — Empty separator ──
+  aoa.push(new Array(nCols).fill(null).map(() => makeS('', {})));
+
+  // ── Row 3 — Column headers ──
+  const headerRow = cols.map(col => {
+    const s = {
+      font: xlsxFont(true),
+      fill: { fgColor: { rgb: XLSX_HEADER_BG }, patternType: 'solid' },
+      alignment: xlsxCenter(),
+      border: xlsxBorder(),
+    };
+    return makeS(col.label, s);
+  });
+  aoa.push(headerRow);
+
+  // ── Data rows — Row 4+ in the array ──
+  for (let ri = 0; ri < nRows; ri++) {
+    const r = rows[ri];
+    const sp = spans[ri];
+    const cells = [];
+
+    for (let ci = 0; ci < nCols; ci++) {
+      const col = cols[ci];
+      let val;
+      if (col.id === 'seq') val = r.seq;
+      else if (col.id === 'cat') val = r.cat;
+      else if (col.id === 'desc') val = r.desc;
+      else val = r[col.id] || '-';
+
+      const s = {
+        font: xlsxFont(false),
+        alignment: col.id === 'seq' ? xlsxCenter() : xlsxLeft(),
+        border: xlsxBorder(),
+      };
+
+      // Merged cell backgrounds (matching QuotationTable bg-muted/30, bg-muted/10)
+      if (mergeFields.includes(col.id)) {
+        const fi = mergeFields.indexOf(col.id);
+        if (sp[col.id] > 0) {
+          s.fill = (fi === 0)
+            ? { fgColor: { rgb: 'E8E8EC' }, patternType: 'solid' }
+            : (fi === 1)
+              ? { fgColor: { rgb: 'F2F2F5' }, patternType: 'solid' }
+              : {};
+        }
+      }
+      cells.push(makeS(val, s));
+    }
+    aoa.push(cells);
+  }
+
+  return { aoa, cols, rows, nCols, nRows, mergeFields, spans, entry };
+}
+
+/** Build worksheet from pre-built aoa data, adding merges/cols/rows. */
+function finalizeSheet(aoa, meta) {
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const { cols, rows, nCols, nRows, mergeFields, spans } = meta;
+
+  const DATA_START = 4; // row index (0-based) where data starts
+
+  // ── Merges ──
+  ws['!merges'] = [];
+  // Title row merge
+  ws['!merges'].push({ s: { r: 0, c: 0 }, e: { r: 0, c: nCols - 1 } });
+  // Meta row merge
+  ws['!merges'].push({ s: { r: 1, c: 0 }, e: { r: 1, c: nCols - 1 } });
+
+  // ── rowSpan merges on hierarchical columns ──
+  for (const field of mergeFields) {
+    const ci = cols.findIndex(c => c.id === field);
+    if (ci < 0) continue;
+    let start = 0;
+    for (let i = 1; i <= nRows; i++) {
+      if (i === nRows || rows[i][field] !== rows[start][field]) {
+        if (i - start > 1) {
+          ws['!merges'].push({
+            s: { r: DATA_START + start, c: ci },
+            e: { r: DATA_START + i - 1, c: ci },
+          });
+        }
+        start = i;
+      }
+    }
+  }
+
+  // ── Row heights ──
+  ws['!rows'] = [];
+  ws['!rows'][0] = { hpx: 36 };  // title
+  ws['!rows'][1] = { hpx: 22 };  // meta
+  ws['!rows'][3] = { hpx: 22 };  // header
+
+  // ── Column widths ──
+  ws['!cols'] = cols.map(c => ({ wch: c.w }));
+
+  return ws;
+}
+
+/** Per-entry export: single-sheet workbook. */
+function exportEntryXlsx(entryIdx) {
+  const entry = allEntries[entryIdx];
+  if (!entry || typeof XLSX === 'undefined') return;
+
+  const { aoa, ...meta } = buildSheetData(entry, `Evaluator 评估结果 #${entryIdx + 1}`);
+  const ws = finalizeSheet(aoa, meta);
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, `#${entryIdx + 1}`);
+
+  XLSX.writeFile(wb, `evaluator-entry-${entryIdx + 1}.xlsx`);
+}
+
+/** Global export: one sheet per entry. */
+function exportAllXlsx() {
+  if (!allEntries.length || typeof XLSX === 'undefined') return;
+
+  const entryFilter = document.getElementById('entryFilter').value;
+  let entries = allEntries;
+  if (entryFilter !== '') {
+    const e = allEntries[parseInt(entryFilter)];
+    entries = e ? [e] : [];
+  }
+
+  const wb = XLSX.utils.book_new();
+  entries.forEach((entry, i) => {
+    const { aoa, ...meta } = buildSheetData(entry, `Evaluator 评估结果 #${i + 1}`);
+    const ws = finalizeSheet(aoa, meta);
+    const dateStr = entry.ts ? new Date(entry.ts).toISOString().slice(0, 10) : 'unknown';
+    const safeName = `E${i + 1}-${dateStr}`.substring(0, 31).replace(/[\[\]:*?\/\\]/g, '-');
+    XLSX.utils.book_append_sheet(wb, ws, safeName);
+  });
+
+  XLSX.writeFile(wb, `evaluator-${entries.length}sheets.xlsx`);
+}
+
+// ── File Input ──
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) readFile(file);
+});
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files[0];
+  if (file) readFile(file);
+});
+
+function readFile(file) {
+  document.getElementById('uploadInfo').textContent = `正在解析: ${file.name}...`;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = processFile(reader.result);
+    document.getElementById('uploadInfo').innerHTML = `
+      解析完成: <strong>${result.parsed}</strong> 条 evaluator 匹配记录
+      （共 ${result.total} 行，跳过 ${result.skipped} 行）
+      <span class="action">拖拽新文件或点击重新选择</span>
+    `;
+    tableSortState = {};
+    render();
+  };
+  reader.readAsText(file);
+}
+
+// ── Event Bindings ──
+document.getElementById('searchInput').addEventListener('input', debounce(buildTables, 200));
+document.getElementById('catFilter').addEventListener('change', buildTables);
+document.getElementById('entryFilter').addEventListener('change', buildTables);
+document.getElementById('expandAllBtn').addEventListener('click', expandAll);
+document.getElementById('collapseAllBtn').addEventListener('click', collapseAll);
+document.getElementById('exportAllBtn').addEventListener('click', exportAllXlsx);
+
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+</script>
+</body>
+</html>

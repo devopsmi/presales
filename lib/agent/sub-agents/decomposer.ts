@@ -515,44 +515,6 @@ function buildR4PromptForSubModule(
   ].join("\n");
 }
 
-// ===========================================================================
-// formatPreviousRows — reconstructs hierarchy tree from QuotationRow[] for LLM reference
-// ===========================================================================
-
-function formatPreviousRows(rows: QuotationRow[]): string {
-  if (!rows.length) return "";
-
-  const moduleMap = new Map<string, Map<string, Map<string, [string, string][]>>>();
-  for (const r of rows) {
-    if (!moduleMap.has(r.module)) moduleMap.set(r.module, new Map());
-    const subMap = moduleMap.get(r.module)!;
-    if (!subMap.has(r.sub_module)) subMap.set(r.sub_module, new Map());
-    const funcMap = subMap.get(r.sub_module)!;
-    if (!funcMap.has(r.function)) funcMap.set(r.function, []);
-    funcMap.get(r.function)!.push([r.sub_function, r.description]);
-  }
-
-  const lines: string[] = [];
-  lines.push(`## 参考：上一次拆解结果（共 ${rows.length} 个叶子行）`);
-  lines.push("请在此结构基础上按修改指令调整，保持未涉及部分不变。");
-  lines.push("");
-
-  for (const [module, subMap] of moduleMap) {
-    lines.push(`### ${module}`);
-    for (const [sub, funcMap] of subMap) {
-      lines.push(`  - ${sub}`);
-      for (const [func, leaves] of funcMap) {
-        lines.push(`    - ${func}`);
-        for (const [subFunc, desc] of leaves) {
-          lines.push(`      - ${subFunc}: ${desc}`);
-        }
-      }
-    }
-  }
-
-  return lines.join("\n");
-}
-
 /**
  * Filters previousRows to only include rows for a specific sub_module,
  * keeping the module context header. Returns empty string if no rows match.

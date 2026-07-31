@@ -210,13 +210,51 @@ function computeQuotationResult(
 
   const [bMin, bMax] = budgetRange;
   let budgetAdvice = "未设置预算";
-  if (bMin > 0 || bMax > 0) {
-    if (totalCost <= bMax && totalCost >= bMin)
+
+  // Auto-scale all man-day values when total cost is outside budget range.
+  // Must recalculate totals from scaled rows rather than just multiplying
+  // tradeTotals — rounding to 1dp means sum(row) ≠ sum(previous) × factor.
+  if ((bMin > 0 || bMax > 0) && totalCost > 0) {
+    let scaleFactor: number | null = null;
+    if (totalCost < bMin && bMin > 0) {
+      scaleFactor = bMin / totalCost;
+    } else if (totalCost > bMax) {
+      scaleFactor = bMax / totalCost;
+    }
+
+    if (scaleFactor != null) {
+      for (const row of rows) {
+        for (const key of Object.keys(row.trades) as TradeRole[]) {
+          const val = row.trades[key];
+          if (typeof val === "number" && val > 0) {
+            row.trades[key] = Math.round(val * scaleFactor * 10) / 10;
+          }
+        }
+      }
+      for (const key of Object.keys(tradeTotals)) {
+        tradeTotals[key] = 0;
+      }
+      for (const row of rows) {
+        for (const [trade, val] of Object.entries(row.trades)) {
+          if (typeof val === "number" && val > 0) {
+            tradeTotals[trade] = (tradeTotals[trade] ?? 0) + val;
+          }
+        }
+      }
+      totalCost = 0;
+      for (const [trade, manDays] of Object.entries(tradeTotals)) {
+        const rate = quotedRates[trade as TradeRole] ?? TRADE_DAILY_RATES[trade as TradeRole] ?? 2000;
+        totalCost += manDays * rate;
+      }
+
+      const pct = Math.round(Math.abs(scaleFactor - 1) * 100);
+      const direction = scaleFactor > 1 ? "上调" : "下调";
+      budgetAdvice = `总报价 ${totalCost.toLocaleString()} 元（自动${direction}${pct}%，系数 ${scaleFactor.toFixed(2)}），已调整至预算范围内`;
+    } else {
       budgetAdvice = `总报价 ${totalCost.toLocaleString()} 元在预算范围内`;
-    else if (totalCost < bMin)
-      budgetAdvice = `总报价 ${totalCost.toLocaleString()} 元低于预算下限`;
-    else
-      budgetAdvice = `总报价 ${totalCost.toLocaleString()} 元超出预算上限`;
+    }
+  } else if (bMin > 0 || bMax > 0) {
+    budgetAdvice = `总报价 ${totalCost.toLocaleString()} 元在预算范围内`;
   }
 
   const trades = new Set<TradeRole>();
@@ -347,7 +385,6 @@ function buildDecomposeTool(model: BaseChatModel) {
       );
 
       cache.stage = "decomposed";
-      cache.evaluateCount = 0;
       cache.rows = result.rows;
 
       return JSON.stringify({
@@ -410,6 +447,7 @@ function buildEstimateHoursTool(model: BaseChatModel) {
       cache.stage = "estimated";
       cache.rows = result.rows;
       cache.header = result.header;
+      cache.evaluateCount = 0;
 
       const quotation = computeQuotationResult(
         result.rows,
@@ -635,7 +673,6 @@ function buildModifyRowsTool() {
       // Invalidate evaluation & estimation when decomposition is modified
       if (cache.evaluationResult?.passed) {
         cache.evaluationResult = null;
-        cache.evaluateCount = 0;
         if (cache.stage === "estimated" || cache.stage === "evaluated") {
           cache.stage = "decomposed";
         }
