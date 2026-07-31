@@ -460,11 +460,8 @@ function buildEvaluateTool(model: BaseChatModel) {
 
       logger.info("evaluate called", { sessionId, rowCount: cache.rows.length, evaluateCount: cache.evaluateCount });
 
-      const quotationData = { rows: cache.rows, header: cache.header ?? {} };
-      const quotationJson = JSON.stringify(quotationData, null, 2);
-
       const result = await runEvaluator(model, sessionId, {
-        quotationJson,
+        rows: cache.rows,
         structuredBrief: cache.structuredBrief,
       });
 
@@ -573,17 +570,20 @@ function buildReadRowsTool() {
         filtered = filtered.filter(r => r.sub_module === sub_module);
       }
 
-      // Build compact text output — seq + 5-level + category + remark (no trades for readability)
-      const lines = filtered.map(r =>
-        `seq-${r.seq} | ${r.category === "design" ? "[设计]" : "[功能]"} ${r.module} → ${r.sub_module} → ${r.function} → ${r.sub_function}: ${r.description}` +
-        (r.remark ? ` (备注: ${r.remark})` : "")
-      );
+      const isOverview = !(seqs && seqs.length > 0) && !module && !sub_module;
+
+      const lines = filtered.map(r => {
+        const prefix = `seq-${r.seq} | ${r.category === "design" ? "[设计]" : "[功能]"} ${r.module} → ${r.sub_module} → ${r.function} → ${r.sub_function}`;
+        if (isOverview) return prefix;
+        return prefix + `: ${r.description}` + (r.remark ? ` (备注: ${r.remark})` : "");
+      });
 
       return JSON.stringify({
         status: "ok",
         matched: filtered.length,
         totalRows: cache.rows.length,
         rows: lines,
+        ...(isOverview && { note: "概览模式已省略功能描述，按模块名/子模块名/seq 筛选后会显示完整信息。" }),
       });
     },
     {

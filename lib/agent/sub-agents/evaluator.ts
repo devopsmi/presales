@@ -2,6 +2,12 @@
  * Evaluator SubAgent — after decomposer completes, reviews the decomposition
  * against the original structuredBrief for fidelity.
  *
+ * Uses a tool-calling agent pattern:
+ *  - The evaluator is given a read_rows tool bound to the decomposer's output,
+ *    allowing it to read quotation rows incrementally (by module, sub_module)
+ *    rather than receiving the entire quotation in one giant prompt.
+ *  - The structuredBrief is provided directly in the user prompt.
+ *
  * Fails when the requirements are detailed and the decomposition exhibits:
  *   - Omission: requirement items absent from the decomposition
  *   - Duplication: same functionality appearing under different names
@@ -12,9 +18,11 @@ import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { EvaluatorOutput } from "@/lib/agent/state";
+import type { QuotationRow } from "@/lib/types";
 import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
 import { getSessionConfig } from "@/lib/session-config";
 import { resolvePrompt } from "@/lib/prompt-defaults";
+import { buildReadRowsTool } from "@/lib/agent/tools/read-rows";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "evaluator" });
@@ -52,7 +60,6 @@ function parseEvaluatorOutput(raw: unknown): EvaluatorOutput {
         severity: item.severity as "error" | "warning",
         location: item.location,
         description: item.description,
-        seq: typeof item.seq === "number" ? item.seq : undefined,
       });
     }
   }
@@ -64,21 +71,60 @@ function parseEvaluatorOutput(raw: unknown): EvaluatorOutput {
   };
 }
 
-/** Build the user prompt containing the full quotation + structuredBrief for evaluation. */
-function buildUserPrompt(opts: {
-  quotationJson: string;
-  structuredBrief: string;
-}): string {
+/**
+ * Extract and parse the final JSON evaluation result from the agent's last message.
+ * The agent may have made multiple tool calls before producing the final answer.
+ */
+function extractEvaluationFromMessages(messages: unknown): { output: string; parsed: EvaluatorOutput } {
+  // messages is typically an array of LangChain message objects
+  const msgArray = Array.isArray(messages) ? messages : [];
+  if (msgArray.length === 0) {
+    throw new Error("Evaluator: no messages returned from agent");
+  }
+
+  // Get the last (AIMessage) content — this is the final evaluation JSON
+  const lastMessage = msgArray[msgArray.length - 1];
+  const rawContent = lastMessage?.content;
+  const output = extractStringContent(rawContent);
+
+  if (!output) {
+    throw new Error("Evaluator: empty output from agent");
+  }
+
+  // Match JSON object — prioritize object over array
+  const match = output.match(/\{[\s\S]*\}/);
+  if (!match) {
+    throw new Error("Evaluator: no JSON object found in agent output");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch (err) {
+    throw new Error(`Evaluator: failed to parse JSON — ${String(err)}`);
+  }
+
+  return { output, parsed: parseEvaluatorOutput(parsed) };
+}
+
+/** Build the user prompt — only contains the structuredBrief; quotation is accessed via read_rows tool. */
+function buildUserPrompt(structuredBrief: string, totalRows: number): string {
   return [
     "## 原始需求简报",
-    opts.structuredBrief,
+    structuredBrief,
     "",
     "---",
     "",
-    "## 生成的报价表（完整 JSON）",
-    opts.quotationJson,
+    `## 报价功能清单（共 ${totalRows} 行）`,
+    `报价功能清单已通过 \`read_rows\` 工具绑定，你可以分批次、分模块读取和比对。`,
     "",
-    "请逐一核对报价表的每个功能项是否与原始需求简报一致。输出评估结果 JSON。",
+    "### 建议阅读策略",
+    `1. 先调用 \`read_rows({})\` (不传参) 获取全部行的层级概览（不含功能描述），了解清单的结构和规模`,
+    `2. 按模块名逐批深度检查：\`read_rows({ module: "XX" })\` 读取一个模块的所有行（含完整描述）`,
+    `3. 如有疑似重复或遗漏，用 \`read_rows({ seqs: [3, 8, 15] })\` 精确定位对比`,
+    `4. 确认遗漏时，想好在需求的哪个位置新增，在 issue 的 location 中描述`,
+    "",
+    "请逐一核对报价表的每个功能项是否与原始需求简报一致。评估完成后，在最终回复中输出完整的评估结果 JSON 对象。",
   ].join("\n");
 }
 
@@ -86,17 +132,17 @@ export async function runEvaluator(
   model: BaseChatModel,
   sessionId: string,
   input: {
-    quotationJson: string;
+    rows: QuotationRow[];
     structuredBrief: string;
   },
 ): Promise<EvaluatorOutput> {
   logger.info("evaluator start", {
     sessionId,
-    quotationLen: input.quotationJson.length,
+    rowCount: input.rows.length,
     briefLen: input.structuredBrief.length,
   });
 
-  if (!input.quotationJson || !input.structuredBrief) {
+  if (!input.rows.length || !input.structuredBrief) {
     return {
       passed: false,
       issues: [
@@ -112,63 +158,28 @@ export async function runEvaluator(
 
   const overrides = getSessionConfig(sessionId)?.promptOverrides;
   const systemPrompt = resolvePrompt("evaluator", overrides);
-  const userPrompt = buildUserPrompt({
-    quotationJson: input.quotationJson,
-    structuredBrief: input.structuredBrief,
+  const userPrompt = buildUserPrompt(input.structuredBrief, input.rows.length);
+
+  // Build the read_rows tool bound to the decomposer's output rows
+  const readRowsTool = buildReadRowsTool(input.rows);
+
+  const agent = createAgent({
+    model,
+    tools: [readRowsTool],
+    systemPrompt,
+    middleware: [createModelLoggingMiddleware("evaluator")],
   });
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let prompt = userPrompt;
-    if (attempt > 0) {
-      prompt += "\n\n⚠️ 上一次输出校验失败，请修正后重新输出有效 JSON。";
-    }
+  const result = await agent.invoke({
+    messages: [new HumanMessage(userPrompt)],
+  });
 
-    const agent = createAgent({
-      model,
-      systemPrompt,
-      middleware: [createModelLoggingMiddleware("evaluator")],
-    });
+  const evalResult = extractEvaluationFromMessages(result.messages);
 
-    const result = await agent.invoke({
-      messages: [new HumanMessage(prompt)],
-    });
+  logger.info("evaluator complete", {
+    passed: evalResult.parsed.passed,
+    issueCount: evalResult.parsed.issues.length,
+  });
 
-    const rawContent = result.messages?.at(-1)?.content;
-    const output = extractStringContent(rawContent);
-
-    if (!output) {
-      const errMsg = `Evaluator: empty output on attempt ${attempt + 1}`;
-      if (attempt === 0) { logger.warn(errMsg); continue; }
-      throw new Error(errMsg);
-    }
-
-    // Match JSON object — prioritize object over array
-    const match = output.match(/\{[\s\S]*\}/);
-    if (!match) {
-      const errMsg = "Evaluator: no JSON object found in output";
-      if (attempt === 0) { logger.warn(errMsg); continue; }
-      throw new Error(errMsg);
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(match[0]);
-    } catch (err) {
-      if (attempt === 0) {
-        logger.warn("evaluator: JSON parse failed, retrying", { error: String(err) });
-        continue;
-      }
-      throw new Error(`Evaluator: failed to parse JSON — ${String(err)}`);
-    }
-
-    const evalResult = parseEvaluatorOutput(parsed);
-
-    logger.info("evaluator complete", {
-      passed: evalResult.passed,
-      issueCount: evalResult.issues.length,
-    });
-    return evalResult;
-  }
-
-  throw new Error("Evaluator: unreachable");
+  return evalResult.parsed;
 }
