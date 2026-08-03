@@ -1,7 +1,7 @@
 /**
  * Main Agent — presales orchestration via LangChain createAgent (Subagent pattern).
  *
- * Exposes 7 tools (3 sub-agents + query_file + grill-me + read_rows + modify_rows) to the LLM.
+ * Exposes 6 tools (3 sub-agents + query_file + grill-me + read_rows) to the LLM.
  *
  * Agent + MemorySaver are module-level singletons – created once, reused across
  * all requests per model. Each tool resolves its session-scoped PipelineCache
@@ -9,13 +9,12 @@
  *
  * Dispatch chain:
  *   parse_files → query_file → grill_me → decompose → evaluate → estimate_hours
- *   read_rows / modify_rows can be used after decompose for targeted edits without re-running full decomposition.
+ *   read_rows can be used after decompose to inspect rows before modifications.
  *
  * Tools:
  *   parse_files    → FileParser sub-agent + auto-generates structuredBrief
  *   query_file     → read parsed file content by index
- *   decompose      → Decomposer sub-agent
- *   modify_rows    → Direct in-place row editing via seq numbers (no sub-agent)
+ *   decompose      → Decomposer sub-agent — also handles row modifications via roundInstructions
  *   evaluate       → Evaluator sub-agent — checks decomposition fidelity against brief
  *   estimate_hours → Estimator sub-agent + quotation computation
  *   grill_me       → loads grill-me skill, runs clarification check (before or after brief)
@@ -35,7 +34,7 @@ import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { PipelineStage, DecomposerProgress, StoredFile, EvaluatorOutput } from "@/lib/agent/state";
 import { getSessionConfig } from "@/lib/session-config";
 import { runFileParser } from "@/lib/agent/sub-agents/file-parser";
-import { runDecomposer } from "@/lib/agent/sub-agents/decomposer";
+import { runDecomposer } from "@/lib/agent/sub-agents/decomposer/index";
 import { runEstimator } from "@/lib/agent/sub-agents/estimator";
 import { runEvaluator } from "@/lib/agent/sub-agents/evaluator";
 import log from "@/lib/logger";
@@ -395,7 +394,7 @@ function buildDecomposeTool(model: BaseChatModel) {
     },
     {
       name: "decompose",
-      description: "将需求简报拆解为五级功能清单。文件解析完成后简报自动生成，无需手动保存。可通过 roundInstructions 精准指定需要修改的拆解层级（如只需调整子模块→调 r2，只需增删功能→调 r3），不传则为全新拆解。",
+      description: "将需求简报拆解为五级功能清单。文件解析完成后简报自动生成，无需手动保存。可通过 roundInstructions 精准指定需要修改的拆解层级（如只需调整子模块→调 r2，只需增删功能→调 r3）。不传 roundInstructions 则为全新拆解；传入 roundInstructions 则为定向修改（基于现有清单，只修改指定层级）。",
       schema: z.object({
         roundInstructions: z.object({
           r1: z.string().optional().describe("模块层（R1）修改指令。适用于增删/合并/拆分模块。如'把模块A和模块B合并为模块AB'。"),
@@ -487,6 +486,8 @@ function buildEvaluateTool(model: BaseChatModel) {
       if (cache.evaluateCount > MAX_EVALUATE_CALLS) {
         logger.warn("evaluate limit exceeded", { sessionId, count: cache.evaluateCount });
         const remaining = cache.rows.filter(r => Object.keys(r.trades).length > 0).length;
+        // Unlock pipeline so estimate_hours can pass its stage check
+        cache.stage = "evaluated";
         return JSON.stringify({
           status: "evaluate_limit",
           evaluateCount: cache.evaluateCount,
@@ -582,7 +583,7 @@ function buildGrillMeTool(model: BaseChatModel) {
 }
 
 // ---------------------------------------------------------------------------
-// Row modification tool — direct in-place edit without re-running decomposer
+// Row reading tool — inspect rows by seq, module, or sub_module
 // ---------------------------------------------------------------------------
 
 function buildReadRowsTool() {
@@ -626,92 +627,11 @@ function buildReadRowsTool() {
     },
     {
       name: "read_rows",
-      description: "按条件读取功能清单中的指定行。可通过 seq 号列表、模块名、子模块名任意组合筛选。用于查看特定行的当前内容，通常在调用 modify_rows 前确认要修改的行。",
+      description: "按条件读取功能清单中的指定行。可通过 seq 号列表、模块名、子模块名任意组合筛选。用于查看特定行的当前内容，或在调用 decompose 修改前确认要修改的行。",
       schema: z.object({
         seqs: z.array(z.number()).optional().describe("要读取的行序号（seq号）列表，如 [3, 5, 12]"),
         module: z.string().optional().describe("按模块名筛选，如 'C端微信小程序'"),
         sub_module: z.string().optional().describe("按子模块名筛选，如 '订单管理'。可配合 module 参数精确过滤同名子模块"),
-      }),
-    },
-  );
-}
-
-function buildModifyRowsTool() {
-  return tool(
-    async ({ changes }: { changes: Array<{ seq: number; module?: string; sub_module?: string; function?: string; sub_function?: string; description?: string; category?: "feature" | "design"; remark?: string }> }, config?: RunnableConfig) => {
-      const sessionId = getSessionId(config);
-      const cache = getOrCreateSessionCache(sessionId);
-
-      if (!cache.rows.length) {
-        return JSON.stringify({ status: "error", message: "功能清单为空，请先完成功能拆解（调用 decompose）。" });
-      }
-
-      const seqMap = new Map(cache.rows.map((r, i) => [r.seq, i]));
-      const applied: number[] = [];
-      const notFound: number[] = [];
-
-      for (const change of changes) {
-        const idx = seqMap.get(change.seq);
-        if (idx === undefined) {
-          notFound.push(change.seq);
-          continue;
-        }
-        const row = cache.rows[idx];
-        if (change.module !== undefined) row.module = change.module;
-        if (change.sub_module !== undefined) row.sub_module = change.sub_module;
-        if (change.function !== undefined) row.function = change.function;
-        if (change.sub_function !== undefined) row.sub_function = change.sub_function;
-        if (change.description !== undefined) row.description = change.description;
-        if (change.category !== undefined) {
-          row.category = change.category;
-          if (row.category === "design") row.trades = {};
-        }
-        if (change.remark !== undefined) row.remark = change.remark;
-        applied.push(change.seq);
-      }
-
-      // Invalidate evaluation & estimation when decomposition is modified
-      if (cache.evaluationResult?.passed) {
-        cache.evaluationResult = null;
-        if (cache.stage === "estimated" || cache.stage === "evaluated") {
-          cache.stage = "decomposed";
-        }
-      }
-
-      const modifiedFields = new Set<string>();
-      for (const c of changes) {
-        for (const key of ["module", "sub_module", "function", "sub_function", "description", "category", "remark"] as const) {
-          if (c[key] !== undefined) modifiedFields.add(key);
-        }
-      }
-
-      return JSON.stringify({
-        status: "ok",
-        applied: applied.length,
-        notFound: notFound.length > 0 ? notFound : undefined,
-        modifiedFields: [...modifiedFields],
-        totalRows: cache.rows.length,
-        message: `已修改 ${applied.length} 行（${[...modifiedFields].join("、")}）` +
-          (notFound.length > 0 ? `，${notFound.length} 行未找到: ${notFound.join(", ")}` : ""),
-        note: cache.stage === "decomposed" ? "功能清单已修改，评估和工时已清空，请重新调用 evaluate 和 estimate_hours。" : undefined,
-      });
-    },
-    {
-      name: "modify_rows",
-      description: "直接修改功能清单中的指定行。通过 seq（序号）定位行，传入需要修改的字段和新值，未传入的字段保持不变。适合小范围修改（如修正错字、调整功能名、合并重复行），无需重新调用 decompose。修改后若需要重新评估或重估工时，需调用 evaluate 和 estimate_hours。",
-      schema: z.object({
-        changes: z.array(
-          z.object({
-            seq: z.number().describe("行的序号（seq号，从报价表中查看）"),
-            module: z.string().optional().describe("新模块名"),
-            sub_module: z.string().optional().describe("新子模块名"),
-            function: z.string().optional().describe("新功能名"),
-            sub_function: z.string().optional().describe("新子功能名"),
-            description: z.string().optional().describe("新功能描述"),
-            category: z.enum(["feature", "design"]).optional().describe("新分类：feature=业务功能，design=设计/基础功能"),
-            remark: z.string().optional().describe("新备注"),
-          })
-        ).describe("修改列表，每项通过 seq 指定要修改的行，其余字段为新值（未传入的保持原样）。"),
       }),
     },
   );
@@ -734,7 +654,6 @@ function buildAgent(model: BaseChatModel, systemPrompt: string) {
       buildGrillMeTool(model),
       buildDecomposeTool(model),
       buildReadRowsTool(),
-      buildModifyRowsTool(),
       buildEvaluateTool(model),
       buildEstimateHoursTool(model),
     ],
