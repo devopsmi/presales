@@ -8,9 +8,10 @@ import { Button } from "@/components/ui/button";
 import type { ModelConfig } from "@/lib/session-config";
 import { DEFAULT_MAX_TOKENS } from "@/lib/session-config";
 import { usePresales } from "@/lib/presales-context";
+import { generateId } from "@/lib/utils";
 
-function generateId(): string {
-  return "m-" + crypto.randomUUID().slice(0, 8);
+function generateModelId(): string {
+  return "m-" + generateId().slice(0, 8);
 }
 
 interface ModelConfigDialogProps {
@@ -31,7 +32,7 @@ export function ModelConfigDialog({ open, onOpenChange }: ModelConfigDialogProps
   function handleAdd() {
     setDraft((prev) => [
       ...prev,
-      { id: generateId(), name: "", model: "", baseUrl: "", apiKey: "", protocol: "openai", maxTokens: DEFAULT_MAX_TOKENS },
+      { id: generateModelId(), name: "", model: "", baseUrl: "", apiKey: "", protocol: "openai", maxTokens: DEFAULT_MAX_TOKENS },
     ]);
   }
 

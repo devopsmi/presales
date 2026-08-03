@@ -5,9 +5,10 @@ import type { TradeRole, Industry } from "@/lib/constants";
 import { DEFAULT_MODEL, DEFAULT_INDUSTRY, INDUSTRY_DEFAULTS, VENDOR_NAME, TRADE_DAILY_RATES } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader, QuotedRates, FileTab } from "@/lib/types";
 import type { ModelConfig } from "@/lib/session-config";
+import { generateId } from "@/lib/utils";
 
 function generateSessionId(): string {
-  return "ses-" + crypto.randomUUID();
+  return "ses-" + generateId();
 }
 
 const SESSION_ID_KEY = "presales-session-id";
@@ -226,7 +227,7 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
   const addAttachments = useCallback((files: File[]) => {
     setAttachments((prev) => [...prev, ...files]);
     const newTabs: FileTab[] = files.map((f) => ({
-      id: `file-${crypto.randomUUID()}`,
+      id: `file-${generateId()}`,
       name: f.name,
       size: f.size,
       file: f,
