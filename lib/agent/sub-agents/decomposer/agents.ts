@@ -23,6 +23,56 @@ function firstLine(s: string): string {
   return `${line}… (${s.length} chars)`;
 }
 
+type AnyAgent = ReturnType<typeof createAgent>;
+
+function isTransientError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as any)?.code ?? (err as any)?.status ?? "";
+
+  if (String(code).includes("503")) return true;
+  if (String(code).includes("429")) return true;
+  if (msg.includes("503")) return true;
+  if (msg.includes("429")) return true;
+  if (msg.includes("rate") || msg.includes("Rate")) return true;
+  if (msg.includes("busy") || msg.includes("Busy")) return true;
+  if (msg.includes("unavailable") || msg.includes("Unavailable")) return true;
+  if (msg.includes("timeout") || msg.includes("Timeout")) return true;
+  if (msg.includes("ECONNRESET") || msg.includes("ETIMEDOUT") || msg.includes("ECONNREFUSED")) return true;
+  return false;
+}
+
+async function invokeWithRetry(
+  agentName: string,
+  agent: AnyAgent,
+  userPrompt: string,
+  recursionLimit: number,
+  maxRetries = 3,
+  baseDelayMs = 1000,
+): Promise<any> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await (agent as any).invoke(
+        { messages: [new HumanMessage(userPrompt)] },
+        { recursionLimit },
+      );
+    } catch (err) {
+      lastError = err;
+      if (attempt === maxRetries) break;
+      if (!isTransientError(err)) break;
+
+      const delay = baseDelayMs * Math.pow(2, attempt);
+      logger.warn(`${agentName} attempt ${attempt + 1} failed (retrying in ${delay}ms)`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 type LevelPromptCtx = {
   brief: string;
   instruction?: string;
@@ -217,9 +267,11 @@ export async function runR1Agent(
     ],
   });
 
-  const result = await agent.invoke(
-    { messages: [new HumanMessage(userPrompt)] },
-    { recursionLimit: 12 },
+  const result = await invokeWithRetry(
+    "decomposer_r1",
+    agent,
+    userPrompt,
+    12,
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
@@ -261,9 +313,11 @@ export async function runR2Agent(
     ],
   });
 
-  const result = await agent.invoke(
-    { messages: [new HumanMessage(userPrompt)] },
-    { recursionLimit: 15 },
+  const result = await invokeWithRetry(
+    "decomposer_r2",
+    agent,
+    userPrompt,
+    15,
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
@@ -303,9 +357,11 @@ export async function runR3Agent(
     ],
   });
 
-  const result = await agent.invoke(
-    { messages: [new HumanMessage(userPrompt)] },
-    { recursionLimit: 20 },
+  const result = await invokeWithRetry(
+    "decomposer_r3",
+    agent,
+    userPrompt,
+    20,
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
@@ -352,9 +408,11 @@ export async function runR4AgentForSubModule(
     ],
   });
 
-  const result = await agent.invoke(
-    { messages: [new HumanMessage(userPrompt)] },
-    { recursionLimit: 20 },
+  const result = await invokeWithRetry(
+    "decomposer_r4",
+    agent,
+    userPrompt,
+    20,
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
