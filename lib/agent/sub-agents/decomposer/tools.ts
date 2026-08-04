@@ -9,9 +9,11 @@
  *
  * Every tool returns JSON so the agent can parse structured results.
  */
-import { tool } from "langchain";
+import { tool, createMiddleware } from "langchain";
 import { z } from "zod";
-import type { DecomposerTable, LevelRow } from "./table";
+import { DecomposerTable } from "./table";
+import type { LevelRow } from "./table";
+import log from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
 // View helpers — format rows for LLM consumption
@@ -631,3 +633,50 @@ export function buildR4Tools(table: DecomposerTable) {
 
 // Re-export formatters for prompt builders
 export { formatModuleList, formatLevelRows, formatSubModuleRows, formatFunctionRows };
+
+// ---------------------------------------------------------------------------
+// Tool-call logging middleware
+// ---------------------------------------------------------------------------
+
+function formatToolArgs(args: Record<string, unknown>): string {
+  const entries = Object.entries(args).map(([k, v]) => {
+    const s = Array.isArray(v)
+      ? `[${(v as unknown[]).length} items]: ${JSON.stringify(v)}`
+      : typeof v === "string" && v.length > 200
+        ? `"${v.slice(0, 200)}…"`
+        : JSON.stringify(v);
+    return `  ${k}: ${s}`;
+  });
+  return entries.length ? `\n${entries.join("\n")}` : "  (none)";
+}
+
+export function createDecomposerToolMiddleware(
+  agentName: string,
+  table: DecomposerTable,
+  level: number,
+  logger: ReturnType<typeof log.child>,
+) {
+  let callN = 0;
+
+  return createMiddleware({
+    name: `ToolLogger_${agentName}`,
+    wrapToolCall: async (request: any, handler: any) => {
+      callN++;
+      const toolName: string = request.toolCall.name;
+      const args = (request.toolCall.args ?? {}) as Record<string, unknown>;
+      const t0 = Date.now();
+
+      logger.info(`  ⚙ #${callN} ${toolName}${formatToolArgs(args)}`);
+
+      const result = await handler(request);
+      const dur = Date.now() - t0;
+
+      logger.info(
+        `  ↳ #${callN} done (${dur}ms)\n` +
+        table.formatTableForLevel(level),
+      );
+
+      return result;
+    },
+  });
+}

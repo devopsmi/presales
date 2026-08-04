@@ -1,13 +1,12 @@
 /**
  * Structured logger with level filtering, request tracing, and context support.
  *
- * - Development: colorized pretty output to stdout + file
- * - Production: newline-delimited JSON to stdout + file
- * - File output: logs/session-{timestamp}.log (one file per process start)
+ * - stdout: colorized human-readable output
+ * - File:   plain-text human-readable output (log/session-{timestamp}.log)
  * - Filter by LOG_LEVEL env var (debug < info < warn < error)
  * - Use `logger.child(ctx)` to create contextual sub-loggers
  */
-
+ 
 let writeToFile: (line: string) => void = () => { };
 
 // Server-only: initialize file logging using Node.js fs module.
@@ -83,7 +82,6 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
 function resolveLogLevel(): LogLevel {
   const raw = process.env.LOG_LEVEL?.toLowerCase();
   if (raw && raw in LEVEL_PRIORITY) return raw as LogLevel;
-  // Default: info in production, debug in development
   return process.env.NODE_ENV === "production" ? "info" : "debug";
 }
 
@@ -92,57 +90,106 @@ function isLevelEnabled(level: LogLevel, threshold: LogLevel): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Pretty formatting (development)
+// ANSI color codes
 // ---------------------------------------------------------------------------
 
-const COLOR_RESET = "\x1b[0m";
+const C = {
+  reset:   "\x1b[0m",
+  dim:     "\x1b[2m",
+  gray:    "\x1b[90m",
+  red:     "\x1b[31m",
+  green:   "\x1b[32m",
+  yellow:  "\x1b[33m",
+  cyan:    "\x1b[36m",
+  magenta: "\x1b[35m",
+} as const;
+
 const LEVEL_COLORS: Record<LogLevel, string> = {
-  debug: "\x1b[36m", // cyan
-  info: "\x1b[32m",  // green
-  warn: "\x1b[33m",  // yellow
-  error: "\x1b[31m", // red
+  debug: C.cyan,
+  info:  C.green,
+  warn:  C.yellow,
+  error: C.red,
 };
 
-function formatPretty(entry: LogEntry): string {
-  const ts = entry.timestamp.slice(11); // HH:mm:ss.SSS
-  const levelColor = LEVEL_COLORS[entry.level];
-  const levelTag = `${levelColor}${entry.level.toUpperCase().padEnd(5)}${COLOR_RESET}`;
-  const ctx = `\x1b[90m[${entry.context}]\x1b[0m`;
-  const rid = entry.requestId ? ` \x1b[35m#${entry.requestId.slice(-6)}\x1b[0m` : "";
-  let line = `${ts} ${levelTag} ${ctx}${rid} ${entry.message}`;
-  if (entry.data && Object.keys(entry.data).length > 0) {
-    line += ` ${JSON.stringify(entry.data)}`;
+// ---------------------------------------------------------------------------
+// Pretty formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a data object as indented key:value pairs.
+ * Nested objects up to 80 chars are inlined; larger ones get pretty-printed.
+ */
+function formatDataField(data: Record<string, unknown>): string {
+  const entries = Object.entries(data).filter(([, v]) => v !== undefined);
+  if (entries.length === 0) return "";
+
+  let result = "";
+  for (const [key, value] of entries) {
+    if (value === null) {
+      result += `\n    ${key}: null`;
+    } else if (typeof value === "object") {
+      const json = JSON.stringify(value);
+      if (json.length <= 80) {
+        result += `\n    ${key}: ${json}`;
+      } else {
+        const indented = JSON.stringify(value, null, 2)
+          .split("\n")
+          .map((ln) => `    ${ln}`)
+          .join("\n");
+        result += `\n    ${key}:`;
+        result += `\n${indented}`;
+      }
+    } else {
+      result += `\n    ${key}: ${String(value)}`;
+    }
   }
+  return result;
+}
+
+/**
+ * Render a single log entry as human-readable text.
+ * @param colorize  append ANSI escape codes for terminal output
+ */
+function formatEntry(entry: LogEntry, colorize: boolean): string {
+  const ts = entry.timestamp.slice(11, 23);            // HH:mm:ss.SSS
+  const levelTag = entry.level.toUpperCase().padEnd(5);
+  const ctx = `[${entry.context}]`;
+  const rid = entry.requestId ? ` #${entry.requestId.slice(-6)}` : "";
+  const dataStr = entry.data ? formatDataField(entry.data) : "";
+
+  if (!colorize) {
+    let line = `${ts} ${levelTag} ${ctx}${rid} ${entry.message}${dataStr}`;
+    if (entry.error) {
+      line += `\n  ╰ ${entry.error}`;
+      if (entry.stack) {
+        const stackLines = entry.stack.split("\n").slice(1, 5);
+        for (const s of stackLines) {
+          line += `\n    ${s.trim()}`;
+        }
+      }
+    }
+    return line;
+  }
+
+  // Colorized terminal output
+  const lc = LEVEL_COLORS[entry.level];
+  let line = `${C.dim}${ts}${C.reset} ${lc}${levelTag}${C.reset} ${C.dim}${ctx}${C.reset}${C.magenta}${rid}${C.reset} ${entry.message}`;
+
+  if (dataStr) {
+    line += `${C.dim}${dataStr}${C.reset}`;
+  }
+
   if (entry.error) {
-    line += `\n  error: ${entry.error}`;
+    line += `\n  ╰ ${C.red}${entry.error}${C.reset}`;
     if (entry.stack) {
-      const stackLines = entry.stack.split("\n").slice(1, 4);
+      const stackLines = entry.stack.split("\n").slice(1, 5);
       for (const s of stackLines) {
-        line += `\n    ${s.trim()}`;
+        line += `\n    ${C.gray}${s.trim()}${C.reset}`;
       }
     }
   }
+
   return line;
-}
-
-// ---------------------------------------------------------------------------
-// JSON formatting (production)
-// ---------------------------------------------------------------------------
-
-function formatJson(entry: LogEntry): string {
-  const output: Record<string, unknown> = {
-    ts: entry.timestamp,
-    lvl: entry.level,
-    ctx: entry.context,
-    msg: entry.message,
-  };
-  if (entry.requestId) output.rid = entry.requestId;
-  if (entry.data && Object.keys(entry.data).length > 0) output.data = entry.data;
-  if (entry.error) {
-    output.err = entry.error;
-    if (entry.stack) output.stack = entry.stack;
-  }
-  return JSON.stringify(output);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,9 +198,6 @@ function formatJson(entry: LogEntry): string {
 
 function createInternalLogger(context: string, requestId?: string): Logger {
   const threshold = resolveLogLevel();
-  const isProd = process.env.NODE_ENV === "production";
-  const formatter = isProd ? formatJson : formatPretty;
-  const writer = isProd ? process.stdout : process.stdout;
 
   function buildEntry(
     level: LogLevel,
@@ -167,31 +211,36 @@ function createInternalLogger(context: string, requestId?: string): Logger {
       context,
       requestId,
       message,
-      data,
+      data: data && Object.keys(data).length > 0 ? data : undefined,
       error: error?.message,
       stack: error?.stack,
     };
   }
 
-  function log(level: LogLevel, message: string, data?: Record<string, unknown>): void {
-    if (!isLevelEnabled(level, threshold)) return;
-    const entry = buildEntry(level, message, data);
-    writer.write(formatter(entry) + "\n");
-    writeToFile(formatJson(entry));
+  function emit(entry: LogEntry): void {
+    process.stdout.write(formatEntry(entry, true) + "\n");
+    writeToFile(formatEntry(entry, false));
   }
 
   const self: Logger = {
-    debug: (msg, data) => log("debug", msg, data),
-    info: (msg, data) => log("info", msg, data),
-    warn: (msg, data) => log("warn", msg, data),
+    debug: (msg, data) => {
+      if (isLevelEnabled("debug", threshold)) emit(buildEntry("debug", msg, data));
+    },
+    info: (msg, data) => {
+      if (isLevelEnabled("info", threshold)) emit(buildEntry("info", msg, data));
+    },
+    warn: (msg, data) => {
+      if (isLevelEnabled("warn", threshold)) emit(buildEntry("warn", msg, data));
+    },
     error: (msg, data) => {
+      if (!isLevelEnabled("error", threshold)) return;
+      // Extract Error object from conventional { error: err } payload
       const errorObj = data?.error instanceof Error ? data.error : undefined;
       const cleanData = data ? { ...data } : undefined;
-      if (errorObj && cleanData) delete (cleanData as Record<string, unknown>).error;
-      if (!isLevelEnabled("error", threshold)) return;
-      const entry = buildEntry("error", msg, cleanData, errorObj);
-      writer.write(formatter(entry) + "\n");
-      writeToFile(formatJson(entry));
+      if (errorObj && cleanData) {
+        delete (cleanData as Record<string, unknown>).error;
+      }
+      emit(buildEntry("error", msg, cleanData, errorObj));
     },
     child: (ctx: Record<string, string>) => {
       const merged = Object.entries(ctx)

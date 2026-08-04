@@ -1,29 +1,27 @@
-/**
- * Agent implementations for each decomposer level (R1-R4).
- *
- * Each function creates a LangChain agent with level-specific CRUD tools,
- * formats the user prompt with the current table state + brief + instruction,
- * and invokes the agent to maintain the shared table.
- */
 import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import type { DecomposerTable, LevelRow } from "./table";
+import { DecomposerTable } from "./table";
+import type { LevelRow } from "./table";
 import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
 import {
   buildR1Tools,
   buildR2Tools,
   buildR3Tools,
   buildR4Tools,
+  createDecomposerToolMiddleware,
   formatModuleList,
 } from "./tools";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "decomposer" });
 
-// ---------------------------------------------------------------------------
-// User prompt builders per level
-// ---------------------------------------------------------------------------
+function firstLine(s: string): string {
+  const end = s.indexOf("\n");
+  const line = end === -1 ? s : s.slice(0, end);
+  if (end === -1) return line;
+  return `${line}… (${s.length} chars)`;
+}
 
 type LevelPromptCtx = {
   brief: string;
@@ -186,7 +184,7 @@ function buildR4UserPrompt(
 }
 
 // ---------------------------------------------------------------------------
-// Public API — one function per level
+// Public API
 // ---------------------------------------------------------------------------
 
 export interface RoundResult {
@@ -201,17 +199,22 @@ export async function runR1Agent(
   systemPrompt: string,
   instruction?: string,
 ): Promise<RoundResult> {
-  const before = new Set(table.getRowsAtLevel(1).map((r) => r.index));
-  const modules = table.getModules();
-  const userPrompt = buildR1UserPrompt(modules, { brief, instruction });
+  const beforeSnap = table.buildLevelSnapshot(1);
+  const userPrompt = buildR1UserPrompt(table.getModules(), { brief, instruction });
 
-  logger.info("decomposer_r1 start", { promptLen: userPrompt.length });
+  logger.info("decomposer_r1 start", {
+    sys: firstLine(systemPrompt),
+    prompt: firstLine(userPrompt),
+  });
 
   const agent = createAgent({
     model,
     systemPrompt,
     tools: buildR1Tools(table),
-    middleware: [createModelLoggingMiddleware("decomposer_r1")],
+    middleware: [
+      createModelLoggingMiddleware("decomposer_r1"),
+      createDecomposerToolMiddleware("decomposer_r1", table, 1, logger),
+    ],
   });
 
   const result = await agent.invoke(
@@ -220,15 +223,14 @@ export async function runR1Agent(
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
-  logger.info("decomposer_r1 complete", { outputLen: output?.length ?? 0 });
+  logger.info("decomposer_r1 complete", {
+    out: firstLine(output ?? ""),
+  });
 
-  const after = new Set(table.getRowsAtLevel(1).map((r) => r.index));
-  const added = [...after].filter((i) => !before.has(i));
+  const afterSnap = table.buildLevelSnapshot(1);
+  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
 
-  return {
-    changedIndices: [...new Set([...added, ...after])],
-    rowCount: after.size,
-  };
+  return { changedIndices, rowCount: afterSnap.size };
 }
 
 export async function runR2Agent(
@@ -238,21 +240,25 @@ export async function runR2Agent(
   systemPrompt: string,
   instruction?: string,
 ): Promise<RoundResult> {
-  const before = new Set(table.getRowsAtLevel(2).map((r) => r.index));
-  const modules = table.getModules();
-  const existingSubs = table.getSubModules();
-  const userPrompt = buildR2UserPrompt(modules, existingSubs, {
+  const beforeSnap = table.buildLevelSnapshot(2);
+  const userPrompt = buildR2UserPrompt(table.getModules(), table.getSubModules(), {
     brief,
     instruction,
   });
 
-  logger.info("decomposer_r2 start", { promptLen: userPrompt.length });
+  logger.info("decomposer_r2 start", {
+    sys: firstLine(systemPrompt),
+    prompt: firstLine(userPrompt),
+  });
 
   const agent = createAgent({
     model,
     systemPrompt,
     tools: buildR2Tools(table),
-    middleware: [createModelLoggingMiddleware("decomposer_r2")],
+    middleware: [
+      createModelLoggingMiddleware("decomposer_r2"),
+      createDecomposerToolMiddleware("decomposer_r2", table, 2, logger),
+    ],
   });
 
   const result = await agent.invoke(
@@ -261,15 +267,14 @@ export async function runR2Agent(
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
-  logger.info("decomposer_r2 complete", { outputLen: output?.length ?? 0 });
+  logger.info("decomposer_r2 complete", {
+    out: firstLine(output ?? ""),
+  });
 
-  const after = new Set(table.getRowsAtLevel(2).map((r) => r.index));
-  const added = [...after].filter((i) => !before.has(i));
+  const afterSnap = table.buildLevelSnapshot(2);
+  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
 
-  return {
-    changedIndices: [...new Set([...added, ...after])],
-    rowCount: after.size,
-  };
+  return { changedIndices, rowCount: afterSnap.size };
 }
 
 export async function runR3Agent(
@@ -280,16 +285,22 @@ export async function runR3Agent(
   systemPrompt: string,
   instruction?: string,
 ): Promise<RoundResult> {
-  const before = new Set(table.getRowsAtLevel(3).map((r) => r.index));
+  const beforeSnap = table.buildLevelSnapshot(3);
   const userPrompt = buildR3UserPrompt(contextRows, { brief, instruction });
 
-  logger.info("decomposer_r3 start", { promptLen: userPrompt.length });
+  logger.info("decomposer_r3 start", {
+    sys: firstLine(systemPrompt),
+    prompt: firstLine(userPrompt),
+  });
 
   const agent = createAgent({
     model,
     systemPrompt,
     tools: buildR3Tools(table),
-    middleware: [createModelLoggingMiddleware("decomposer_r3")],
+    middleware: [
+      createModelLoggingMiddleware("decomposer_r3"),
+      createDecomposerToolMiddleware("decomposer_r3", table, 3, logger),
+    ],
   });
 
   const result = await agent.invoke(
@@ -298,15 +309,14 @@ export async function runR3Agent(
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
-  logger.info("decomposer_r3 complete", { outputLen: output?.length ?? 0 });
+  logger.info("decomposer_r3 complete", {
+    out: firstLine(output ?? ""),
+  });
 
-  const after = new Set(table.getRowsAtLevel(3).map((r) => r.index));
-  const added = [...after].filter((i) => !before.has(i));
+  const afterSnap = table.buildLevelSnapshot(3);
+  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
 
-  return {
-    changedIndices: [...new Set([...added, ...after])],
-    rowCount: after.size,
-  };
+  return { changedIndices, rowCount: afterSnap.size };
 }
 
 export async function runR4AgentForSubModule(
@@ -319,8 +329,7 @@ export async function runR4AgentForSubModule(
   systemPrompt: string,
   instruction?: string,
 ): Promise<RoundResult> {
-  const before = table.getRowsForSubModule(module, subModule);
-  const beforeIndices = new Set(before.map((r) => r.index));
+  const beforeSnap = table.buildLevelSnapshot(4, { module, subModule });
   const userPrompt = buildR4UserPrompt(rows, module, subModule, {
     brief,
     instruction,
@@ -329,14 +338,18 @@ export async function runR4AgentForSubModule(
   logger.info("decomposer_r4 start", {
     module,
     subModule,
-    promptLen: userPrompt.length,
+    sys: firstLine(systemPrompt),
+    prompt: firstLine(userPrompt),
   });
 
   const agent = createAgent({
     model,
     systemPrompt,
     tools: buildR4Tools(table),
-    middleware: [createModelLoggingMiddleware("decomposer_r4")],
+    middleware: [
+      createModelLoggingMiddleware("decomposer_r4"),
+      createDecomposerToolMiddleware("decomposer_r4", table, 4, logger),
+    ],
   });
 
   const result = await agent.invoke(
@@ -348,15 +361,11 @@ export async function runR4AgentForSubModule(
   logger.info("decomposer_r4 complete", {
     module,
     subModule,
-    outputLen: output?.length ?? 0,
+    out: firstLine(output ?? ""),
   });
 
-  const after = table.getRowsForSubModule(module, subModule);
-  const afterIndices = new Set(after.map((r) => r.index));
-  const added = [...afterIndices].filter((i) => !beforeIndices.has(i));
+  const afterSnap = table.buildLevelSnapshot(4, { module, subModule });
+  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
 
-  return {
-    changedIndices: [...new Set([...added, ...afterIndices])],
-    rowCount: after.length,
-  };
+  return { changedIndices, rowCount: afterSnap.size };
 }

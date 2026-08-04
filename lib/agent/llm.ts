@@ -94,7 +94,9 @@ function getMsgPreview(msg: Record<string, unknown>): string {
     if (r) return `[reasoning ${r.length} chars]`;
     return "[empty]";
   }
-  return c.length > PREVIEW_LEN ? c.slice(0, PREVIEW_LEN) + "…" : c;
+  const end = c.indexOf("\n");
+  if (end === -1) return c;
+  return `${c.slice(0, end)}… (${c.length} chars)`;
 }
 
 function dur(ms: number): string {
@@ -126,9 +128,10 @@ export function createModelLoggingMiddleware(agentName: string) {
       });
 
       if (sysContent) {
+        const end = sysContent.indexOf("\n");
         llmLog.debug("  sys", {
           agent: agentName,
-          preview: sysContent.length > PREVIEW_LEN ? sysContent.slice(0, PREVIEW_LEN) + "…" : sysContent,
+          preview: end === -1 ? sysContent : `${sysContent.slice(0, end)}… (${sysContent.length} chars)`,
         });
       }
 

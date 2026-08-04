@@ -111,17 +111,52 @@ export class DecomposerTable {
   }
 
   // -----------------------------------------------------------------------
-  // Row access
+  // Diff helper — used by agents to compute true changedIndices
   // -----------------------------------------------------------------------
 
-  /** Get all rows (internal). */
-  getAllRows(): DecomposerRow[] {
-    return this.rows;
+  /**
+   * Build a "before" snapshot of this level's column values.
+   * Returns Map<index, columnValue> where columnValue encodes the relevant
+   * column(s) at this level:
+   *   L1: module name
+   *   L2: "module::sub_module"
+   *   L3: "module::sub_module::function"
+   *   L4: "module::sub_module::function::sub_function||description"
+   */
+  buildLevelSnapshot(level: number, filter?: { module: string; subModule: string; functionKeys?: Set<string> }): Map<number, string> {
+    const rows = filter
+      ? this.getRowsForSubModule(filter.module, filter.subModule, filter.functionKeys)
+      : this.getRowsAtLevel(level);
+
+    const snap = new Map<number, string>();
+    for (const r of rows) {
+      let val: string;
+      switch (level) {
+        case 1: val = r.module; break;
+        case 2: val = `${r.module}::${r.sub_module}`; break;
+        case 3: val = `${r.module}::${r.sub_module}::${r.function}`; break;
+        case 4: val = `${r.module}::${r.sub_module}::${r.function}::${r.sub_function}||${r.description ?? ""}`; break;
+        default: val = "";
+      }
+      snap.set(r.index, val);
+    }
+    return snap;
   }
 
-  /** Get row by index. */
-  getRow(index: number): DecomposerRow | undefined {
-    return this.rows.find((r) => r.index === index);
+  /**
+   * Diff before vs after snapshots.
+   * Returns indices that are NEW (in after, not before), MODIFIED (in both, value changed),
+   * or DELETED (in before, not after).
+   */
+  static diffSnapshots(before: Map<number, string>, after: Map<number, string>): number[] {
+    const changed = new Set<number>();
+    for (const [idx, val] of after) {
+      if (!before.has(idx) || before.get(idx) !== val) changed.add(idx);
+    }
+    for (const idx of before.keys()) {
+      if (!after.has(idx)) changed.add(idx);
+    }
+    return [...changed];
   }
 
   // -----------------------------------------------------------------------
@@ -167,14 +202,8 @@ export class DecomposerTable {
       .filter((r) => {
         if (r.module == null || r.sub_module == null) return false;
         if (level === 3) {
-          if (r.function != null) return false; // R3 adds functions; view is R2-level rows
-          return changes.affectedSubModules.has(makeSubModuleKey(r.module, r.sub_module));
-        }
-        if (level === 4) {
-          if (r.function == null) return false;
-          return changes.affectedFunctions.has(
-            makeFunctionKey(r.module, r.sub_module, r.function),
-          );
+          return r.function == null
+            && changes.affectedSubModules.has(makeSubModuleKey(r.module, r.sub_module));
         }
         return false;
       })
@@ -480,6 +509,9 @@ export class DecomposerTable {
         return;
       }
     }
+    throw new Error(
+      `Cannot update description: leaf "${module} → ${subModule} → ${funcName} → ${subFuncName}" not found`,
+    );
   }
 
   renameSubFunction(
@@ -500,25 +532,15 @@ export class DecomposerTable {
         return;
       }
     }
+    throw new Error(
+      `Cannot rename sub_function: "${module} → ${subModule} → ${funcName} → ${oldName}" not found`,
+    );
   }
 
   // -----------------------------------------------------------------------
   // Change tracking helpers
   // -----------------------------------------------------------------------
 
-  /** Create an empty change set. */
-  static emptyChangeSet(): RoundChangeSet {
-    return {
-      affectedIndices: new Set(),
-      affectedSubModules: new Set(),
-      affectedFunctions: new Set(),
-    };
-  }
-
-  /**
-   * Build a change set from a list of added/modified indices.
-   * Populates sub_module and function keys automatically.
-   */
   buildChangeSet(indices: number[]): RoundChangeSet {
     const cs: RoundChangeSet = {
       affectedIndices: new Set(indices),
@@ -577,5 +599,85 @@ export class DecomposerTable {
         sub_function: r.sub_function,
         description: r.description,
       }));
+  }
+
+  // -----------------------------------------------------------------------
+  // Human-readable table formatter — for tool-call logging
+  // -----------------------------------------------------------------------
+
+  private static COL_WIDTHS: Record<string, number> = {
+    idx: 5,
+    module: 18,
+    sub_module: 16,
+    function: 16,
+    sub_function: 14,
+    description: 24,
+  };
+
+  formatTableForLevel(level: number): string {
+    const rows = this.getRowsAtLevel(level);
+    if (!rows.length) return "  (empty)";
+
+    const cols = this.columnsForLevel(level);
+    const widths = this.computeColumnWidths(rows, cols, level);
+
+    const sep = cols.map((c) => "─".repeat(widths[c])).join("─┼─");
+    const header = cols.map((c) => c.padEnd(widths[c])).join(" │ ");
+    const lines: string[] = [
+      `  ┌─${sep}─┐`,
+      `  │ ${header} │`,
+      `  ├─${sep}─┤`,
+    ];
+
+    for (const r of rows) {
+      const vals = cols.map((c) => this.cellValue(r, c, level).padEnd(widths[c]));
+      lines.push(`  │ ${vals.join(" │ ")} │`);
+    }
+    lines.push(`  └─${sep}─┘`);
+
+    return lines.join("\n");
+  }
+
+  private columnsForLevel(level: number): string[] {
+    switch (level) {
+      case 1: return ["idx", "module"];
+      case 2: return ["idx", "module", "sub_module"];
+      case 3: return ["idx", "module", "sub_module", "function"];
+      case 4: return ["idx", "module", "sub_module", "function", "sub_function", "description"];
+      default: return ["idx"];
+    }
+  }
+
+  private computeColumnWidths(
+    rows: LevelRow[],
+    cols: string[],
+    level: number,
+  ): Record<string, number> {
+    const widths: Record<string, number> = {};
+    for (const c of cols) {
+      const headerLen = c.length;
+      let maxData = 0;
+      for (const r of rows) {
+        const v = this.cellValue(r, c, level);
+        maxData = Math.max(maxData, v.length);
+      }
+      widths[c] = Math.min(Math.max(headerLen, maxData), DecomposerTable.COL_WIDTHS[c] ?? 20);
+    }
+    return widths;
+  }
+
+  private cellValue(row: LevelRow, col: string, _level: number): string {
+    switch (col) {
+      case "idx": return String(row.index);
+      case "module": return row.module;
+      case "sub_module": return row.sub_module ?? "";
+      case "function": return row.function ?? "";
+      case "sub_function": return row.sub_function ?? "";
+      case "description": {
+        const d = row.description ?? "";
+        return d.length > 22 ? d.slice(0, 22) + ".." : d;
+      }
+      default: return "";
+    }
   }
 }

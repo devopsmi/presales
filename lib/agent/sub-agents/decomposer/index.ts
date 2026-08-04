@@ -33,6 +33,12 @@ import log from "@/lib/logger";
 
 const logger = log.child({ agent: "decomposer" });
 
+function firstLine(s: string): string {
+  const end = s.indexOf("\n");
+  if (end === -1) return s;
+  return `${s.slice(0, end)}… (${s.length} chars)`;
+}
+
 function determineStartRound(
   ri?: { r1?: string; r2?: string; r3?: string; r4?: string },
 ): number {
@@ -78,7 +84,7 @@ export async function runDecomposer(
   const startRound = determineStartRound(ri);
 
   logger.info("decomposer start (agent-based)", {
-    briefLen: brief.length,
+    brief: firstLine(brief),
     hasRoundInstructions: !!ri,
     hasPreviousRows: !!input.previousRows?.length,
     startRound,
@@ -217,10 +223,9 @@ export async function runDecomposer(
           module: string;
           subModule: string;
           rows: LevelRow[];
-          hasInstruction: boolean;
         }> = [];
 
-        for (const [_key, { module, subModule, funcs: allFuncRows }] of allSubModuleGroups) {
+        for (const [, { module, subModule }] of allSubModuleGroups) {
           // Agent-level pruning: skip sub_modules not affected by parent changes
           if (affectedSubModuleKeys && !affectedSubModuleKeys.has(`${module}::${subModule}`)) {
             continue;
@@ -240,11 +245,11 @@ export async function runDecomposer(
 
           if (rows.length === 0) continue;
 
-          r4Tasks.push({ module, subModule, rows, hasInstruction });
+          r4Tasks.push({ module, subModule, rows });
         }
 
         // Fire parallel R4 calls
-        const r4Promises = r4Tasks.map(async ({ module, subModule, rows, hasInstruction: taskHasInstruction }) => {
+        const r4Promises = r4Tasks.map(async ({ module, subModule, rows }) => {
           const taskInstruction = hasInstruction ? instruction : undefined;
           const r4Result = await runR4AgentForSubModule(
             model,
@@ -279,6 +284,14 @@ export async function runDecomposer(
 
   // 4. Convert to QuotationRow[]
   const rows = table.toQuotationRows();
+
+  if (rows.length === 0) {
+    logger.warn("decomposer produced empty result", {
+      totalRows: table.buildLevelSnapshot(4).size,
+      moduleCount: table.getModules().length,
+      startRound,
+    });
+  }
 
   logger.info("decomposer complete (agent-based)", {
     rows: rows.length,
