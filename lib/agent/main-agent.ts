@@ -33,7 +33,7 @@ import { TRADE_DAILY_RATES } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { PipelineStage, DecomposerProgress, StoredFile, EvaluatorOutput } from "@/lib/agent/state";
 import { getSessionConfig } from "@/lib/session-config";
-import { runFileParser } from "@/lib/agent/sub-agents/file-parser";
+import { parseFile } from "@/lib/agent/tools/file-parser";
 import { runDecomposer } from "@/lib/agent/sub-agents/decomposer/index";
 import { runEstimator } from "@/lib/agent/sub-agents/estimator";
 import { runEvaluator } from "@/lib/agent/sub-agents/evaluator";
@@ -268,18 +268,33 @@ function computeQuotationResult(
 // Tool builders — all resolve session via config.configurable.thread_id
 // ---------------------------------------------------------------------------
 
-function buildParseFilesTool(model: BaseChatModel) {
+function buildParseFilesTool() {
   return tool(
-    async ({ rawText }: { rawText: string }, config?: RunnableConfig) => {
+    async ({ rawText: _rawText }: { rawText: string }, config?: RunnableConfig) => {
       const sessionId = getSessionId(config);
       const cache = getOrCreateSessionCache(sessionId);
       logger.info("parse_files called", { sessionId });
-      await runFileParser(model, sessionId, cache.fileStore);
+
+      const files = Array.from(cache.fileStore.values());
+      const unparsed = files.filter((f) => !f.parsed);
+      let parsedCount = 0;
+
+      for (const file of unparsed) {
+        try {
+          const buffer = Buffer.from(file.body, "base64");
+          const content = await parseFile(buffer, file.type, file.name);
+          file.parsed = content;
+          parsedCount++;
+          logger.info("file parsed", { index: file.index, name: file.name, type: file.type });
+        } catch (err) {
+          logger.error("file parse failed", { index: file.index, name: file.name, type: file.type, error: err });
+        }
+      }
 
       // Auto-generate structuredBrief from parsed file content
       const all = Array.from(cache.fileStore.values());
       const parsed = all.filter((f) => f.parsed);
-      const unparsed = all.filter((f) => !f.parsed);
+      const stillUnparsed = all.filter((f) => !f.parsed);
 
       if (parsed.length > 0) {
         const briefParts: string[] = ["## 文件解析汇总\n"];
@@ -312,16 +327,16 @@ function buildParseFilesTool(model: BaseChatModel) {
       return JSON.stringify({
         status: "ok",
         parsedCount: parsed.length,
-        unparsedCount: unparsed.length,
+        unparsedCount: stillUnparsed.length,
         parsedFiles: parsed.map((f) => ({ name: f.name, type: f.type, parsed: f.parsed })),
         message: parsed.length > 0
-          ? `文件解析完成：${parsed.length} 个已解析，需求简报已自动生成。${unparsed.length ? ` ${unparsed.length} 个解析失败。` : ""}`
+          ? `文件解析完成：${parsed.length} 个已解析，需求简报已自动生成。${stillUnparsed.length ? ` ${stillUnparsed.length} 个解析失败。` : ""}`
           : "没有文件需要解析。",
       });
     },
     {
       name: "parse_files",
-      description: "启动文件解析子Agent，逐一解析待解析文件的文本内容。参数 rawText 为用户的完整原始需求描述。",
+      description: "解析待解析文件的文本内容（PDF/Word/Excel/图片），自动生成需求简报。",
       schema: z.object({
         rawText: z.string().describe("用户的完整原始需求描述文本"),
       }),
@@ -649,7 +664,7 @@ function buildAgent(model: BaseChatModel, systemPrompt: string) {
   return createAgent({
     model,
     tools: [
-      buildParseFilesTool(model),
+      buildParseFilesTool(),
       buildQueryFileTool(),
       buildGrillMeTool(model),
       buildDecomposeTool(model),
