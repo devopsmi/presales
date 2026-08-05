@@ -537,10 +537,22 @@ function buildGrillMeTool(model: BaseChatModel) {
       const overrideGrillMe = sessionConfig.promptOverrides?.grill_me;
       const skillContent = overrideGrillMe?.trim() || loadSkillContent("grill-me");
 
-      const grillAgent = createAgent({
-        model,
-        systemPrompt: skillContent,
-      });
+      // Cache the grill agent per (model, skillContent) pair — avoid rebuilding a
+      // LangGraph agent (with its own MemorySaver + middleware) on every call.
+      const grillCacheKey = `grill__${getModelKey(model)}__${hashPrompt(skillContent)}`;
+      let grillAgent = agentCache.get(grillCacheKey);
+      if (!grillAgent) {
+        if (agentCache.size >= AGENT_CACHE_MAX) {
+          const oldest = agentCache.keys().next().value!;
+          agentCache.delete(oldest);
+        }
+        grillAgent = createAgent({
+          model,
+          systemPrompt: skillContent,
+        });
+        agentCache.set(grillCacheKey, grillAgent);
+        logger.info("grill agent created and cached", { modelKey: getModelKey(model), promptHash: hashPrompt(skillContent) });
+      }
 
       const result = await grillAgent.invoke({
         messages: [

@@ -141,7 +141,8 @@ export async function POST(req: Request) {
 
     const encoder = new TextEncoder();
     const abort = new AbortController();
-    req.signal.addEventListener("abort", () => abort.abort(), { once: true });
+    const onAbort = () => abort.abort();
+    req.signal.addEventListener("abort", onAbort, { once: true });
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -184,6 +185,7 @@ export async function POST(req: Request) {
           await Promise.all([
             (async () => {
               for await (const message of run.messages) {
+                if (aborted || abort.signal.aborted) break;
                 let textStarted = false;
                 let currentTextId = `${Date.now()}-${textCounter++}`;
                 let tokenBuffer: string[] = [];
@@ -231,6 +233,7 @@ export async function POST(req: Request) {
             })(),
             (async () => {
               for await (const call of run.toolCalls) {
+                if (aborted || abort.signal.aborted) break;
                 toolEventInterrupted = true;
                 const toolCallId = call.callId || `tc-${call.name}-${Date.now()}`;
                 send({ type: "tool-input-start", toolCallId, toolName: mapToolName(call.name) });
@@ -269,17 +272,17 @@ export async function POST(req: Request) {
             })(),
           ]);
 
-          send({ type: "finish", finishReason: "stop" });
-          controller.close();
         } catch (err) {
           if (!aborted) {
             log.error("agent failed", {
               error: err instanceof Error ? err : new Error(String(err)),
             });
             send({ type: "error", error: err instanceof Error ? err.message : "Agent error" });
-            send({ type: "finish", finishReason: "error" });
-            controller.close();
           }
+        } finally {
+          send({ type: "finish", finishReason: aborted ? "error" : "stop" });
+          controller.close();
+          req.signal.removeEventListener("abort", onAbort);
         }
       },
       cancel() {

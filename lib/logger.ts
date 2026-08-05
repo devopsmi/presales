@@ -36,6 +36,25 @@ if (typeof window === "undefined") {
   writeToFile = (line: string) => {
     fileStream.write(line + "\n");
   };
+
+  // Graceful shutdown: flush and close the file stream on process exit so
+  // buffered writes are not lost when the process is killed (e.g. PM2 restart).
+  const cleanup = () => {
+    try {
+      fileStream.end();
+    } catch {
+      /* ignore */
+    }
+  };
+  process.on("exit", cleanup);
+  process.on("SIGTERM", () => {
+    cleanup();
+    process.exit(0);
+  });
+  process.on("SIGINT", () => {
+    cleanup();
+    process.exit(0);
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -69,8 +69,10 @@ function FilePreview({ tab, ext }: { tab: FileTab; ext: string }) {
     }
 
     if (TEXT_EXTENSIONS.has(ext) || ext === "") {
+      let cancelled = false;
       const reader = new FileReader();
       reader.onload = () => {
+        if (cancelled) return;
         const text = reader.result as string;
         if (text.includes("\x00")) {
           setContentState({
@@ -82,10 +84,14 @@ function FilePreview({ tab, ext }: { tab: FileTab; ext: string }) {
         }
       };
       reader.onerror = () => {
+        if (cancelled) return;
         setContentState({ status: "error", message: "文件读取失败" });
       };
       reader.readAsText(tab.file);
-      return;
+      return () => {
+        cancelled = true;
+        reader.abort();
+      };
     }
 
     setContentState({

@@ -162,7 +162,7 @@ export function AgentChatPanel() {
 
   // filesRef is read at fetch call time (async), not during render — the refs lint is a false positive here
   // eslint-disable-next-line react-hooks/refs
-  const transport = new DefaultChatTransport({
+  const transport = useMemo(() => new DefaultChatTransport({
     body: { sessionId },
     async fetch(url, init) {
       if (init?.body) {
@@ -184,7 +184,7 @@ export function AgentChatPanel() {
       }
       return fetch(url, init);
     },
-  });
+  }), [sessionId]);
 
   const { messages, status, sendMessage, stop } = useChat({
     transport,

@@ -39,12 +39,17 @@ export function DecomposerProgressCard({
   const [progress, setProgress] = useState<ProgressData | null>(null);
   const [active, setActive] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
 
   const poll = useCallback(async () => {
     try {
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
       const res = await fetch(
         `/api/decompose/progress?sessionId=${encodeURIComponent(sessionId)}`,
+        { signal: controller.signal },
       );
       if (!res.ok || !mountedRef.current) return;
       const data: ProgressResponse = await res.json();
@@ -53,7 +58,8 @@ export function DecomposerProgressCard({
       if (data.progress) {
         setProgress(data.progress);
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       // Poll silently fails — progress will update on next tick
     }
   }, [sessionId]);
@@ -81,6 +87,8 @@ export function DecomposerProgressCard({
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
     };
   }, [status, poll]);
 

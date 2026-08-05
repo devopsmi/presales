@@ -16,13 +16,14 @@ export async function concurrentLimit<T>(
     const p = (typeof task === "function" ? task() : task).then((r) => {
       results.push(r);
     });
+    p.then(
+      () => executing.delete(p),
+      () => executing.delete(p),
+    );
     executing.add(p);
 
     if (executing.size >= limit) {
       await Promise.race(executing);
-    }
-    for (const e of executing) {
-      e.then(() => executing.delete(e), () => executing.delete(e));
     }
   }
 
