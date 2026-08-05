@@ -25,10 +25,10 @@ async function testAll() {
   };
 
   const rows: QuotationRow[] = [
-    { seq: 1, module: "系统设计", sub_module: "框架设计", function: "框架建设", sub_function: "框架建设", description: "前后端基础技术栈选型架构搭建", category: "design", trades: { frontend: 1, backend: 3, design: 0.5 }, remark: "" },
-    { seq: 2, module: "系统设计", sub_module: "数据设计", function: "数据建模", sub_function: "数据建模", description: "数据建模", category: "design", trades: { frontend: 0, backend: 2, design: 1 }, remark: "" },
-    { seq: 3, module: "可视化大屏", sub_module: "运营看板", function: "总营收", sub_function: "营收总额", description: "统计所有分公司当年总营收", category: "feature", trades: { frontend: 0.5, backend: 0.5, design: 3 }, remark: "详见原型" },
-    { seq: 4, module: "可视化大屏", sub_module: "运营看板", function: "分公司营收", sub_function: "各分公司营收", description: "统计每个分公司当年总营收", category: "feature", trades: { frontend: 0.5, backend: null, design: null }, remark: "" },
+    { seq: 1, module: "系统设计", sub_module: "框架设计", function: "框架建设", sub_function: "框架建设", description: "前后端基础技术栈选型架构搭建", trades: { frontend: 1, backend: 3, design: 0.5 }, remark: "" },
+    { seq: 2, module: "系统设计", sub_module: "数据设计", function: "数据建模", sub_function: "数据建模", description: "数据建模", trades: { frontend: 0, backend: 2, design: 1 }, remark: "" },
+    { seq: 3, module: "可视化大屏", sub_module: "运营看板", function: "总营收", sub_function: "营收总额", description: "统计所有分公司当年总营收", trades: { frontend: 0.5, backend: 0.5, design: 3 }, remark: "详见原型" },
+    { seq: 4, module: "可视化大屏", sub_module: "运营看板", function: "分公司营收", sub_function: "各分公司营收", description: "统计每个分公司当年总营收", trades: { frontend: 0.5, backend: null, design: null }, remark: "" },
   ];
 
   const trades: TradeRole[] = ["frontend", "backend", "design"];
@@ -160,7 +160,7 @@ async function testAll() {
 
   // Test with different trade count
   const singleTradeRows: QuotationRow[] = [
-    { seq: 1, module: "A", sub_module: "B", function: "C", sub_function: "D", description: "E", category: "feature", trades: { frontend: 5 }, remark: "test" },
+    { seq: 1, module: "A", sub_module: "B", function: "C", sub_function: "D", description: "E", trades: { frontend: 5 }, remark: "test" },
   ];
   const singleTradeBuffer = await generateQuotationXlsx(singleTradeRows, ["frontend"], header);
   assert(singleTradeBuffer.length > 0, "Single trade produces non-empty buffer");

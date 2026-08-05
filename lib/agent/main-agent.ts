@@ -493,7 +493,7 @@ function buildEvaluateTool(model: BaseChatModel) {
 
       cache.evaluationResult = result;
 
-      if (result.passed) {
+      if (result.passed || cache.evaluateCount >= MAX_EVALUATE_CALLS) {
         cache.stage = "evaluated";
       }
 
@@ -505,7 +505,9 @@ function buildEvaluateTool(model: BaseChatModel) {
         issues: result.issues,
         message: result.passed
           ? `评估通过：功能拆解与原需求一致。`
-          : `评估不通过（第 ${cache.evaluateCount}/${MAX_EVALUATE_CALLS} 次）：发现 ${result.issues.filter(i => i.severity === "error").length} 个错误、${result.issues.filter(i => i.severity === "warning").length} 个警告。请根据 issues 中的具体描述修正后重新评估。`,
+          : cache.evaluateCount >= MAX_EVALUATE_CALLS
+            ? `评估不通过（第 ${cache.evaluateCount}/${MAX_EVALUATE_CALLS} 次，已达上限）：发现 ${result.issues.filter(i => i.severity === "error").length} 个错误、${result.issues.filter(i => i.severity === "warning").length} 个警告。不再重新评估，请直接调用 estimate_hours 生成最终报价表。`
+            : `评估不通过（第 ${cache.evaluateCount}/${MAX_EVALUATE_CALLS} 次）：发现 ${result.issues.filter(i => i.severity === "error").length} 个错误、${result.issues.filter(i => i.severity === "warning").length} 个警告。请根据 issues 中的具体描述修正后重新评估。`,
       });
     },
     {
@@ -595,7 +597,8 @@ function buildReadRowsTool() {
       const isOverview = !module && !sub_module;
 
       const lines = filtered.map(r => {
-        const prefix = `[${r.category === "design" ? "设计" : "功能"}] ${r.module}` +
+        const isSupport = r.function === r.sub_function;
+        const prefix = `[${isSupport ? "设计" : "功能"}] ${r.module}` +
           ` → ${r.sub_module} → ${r.function}` +
           (r.sub_function ? ` → ${r.sub_function}` : "");
         if (isOverview) return prefix;

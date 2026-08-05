@@ -44,7 +44,6 @@ export interface QuotationRow {
   function: string;
   sub_function: string;
   description: string;
-  category: "design" | "feature";
   trades: Partial<Record<TradeRole, number | null>>;
   remark: string;
 }

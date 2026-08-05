@@ -136,7 +136,7 @@ function buildR2UserPrompt(
 
   parts.push(
     "## 任务\n请根据项目简报和已有模块，为每个模块拆解子模块。" +
-    "使用 add_sub_modules 逐模块添加。纯文档/设计的辅助域（非开发交付范畴）不拆分，含接口定义/API文档等开发产出的为开发模块需拆分。" +
+    "使用 add_sub_modules 逐模块添加。如果某模块或子模块是纯文档/设计的辅助域（非开发交付范畴），请使用 mark_module_support 或 mark_sub_module_support 标记。含接口定义/API文档等开发产出的为开发模块，正常拆解。" +
     "完成后调用 read_sub_modules 确认。",
   );
   return parts.join("\n");

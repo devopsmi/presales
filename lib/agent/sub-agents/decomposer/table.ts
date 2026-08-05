@@ -12,6 +12,7 @@ export interface TreeNode {
   name: string;
   description: string | null; // only for leaf nodes
   children: TreeNode[];
+  category?: "feature" | "support"; // undefined treated as "feature"
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,23 @@ export class DecomposerTree {
     const funcCache = new Map<string, TreeNode>();
 
     for (const row of previousRows) {
+      // Detect old design placeholder rows: all 4 hierarchy levels equal
+      const isOldDesign = row.module === row.sub_module &&
+        row.sub_module === row.function &&
+        row.function === row.sub_function;
+
+      if (isOldDesign) {
+        // Create support module with NO children
+        let mod = modCache.get(row.module);
+        if (!mod) {
+          mod = { id: tree.nextId++, type: "module", name: row.module, description: row.description || row.module, children: [], category: "support" };
+          tree.root.push(mod);
+          tree.idMap.set(mod.id, mod);
+          modCache.set(row.module, mod);
+        }
+        continue;
+      }
+
       let mod = modCache.get(row.module);
       if (!mod) {
         mod = { id: tree.nextId++, type: "module", name: row.module, description: null, children: [] };
@@ -119,42 +137,76 @@ export class DecomposerTree {
     const rows: QuotationRow[] = [];
     let seq = 0;
 
-    // Core domain modules: leaf-level rows
-    for (const mod of this.root) {
-      for (const sub of mod.children) {
-        for (const func of sub.children) {
-          for (const leaf of func.children) {
+    const traverse = (
+      node: TreeNode,
+      modName: string,
+      subName: string,
+      funcName: string,
+    ): void => {
+      if (node.category === "support") {
+        // Support node: emit ONE placeholder row, stop recursion
+        const desc = node.description ?? node.name;
+        switch (node.type) {
+          case "module":
             rows.push({
-              seq: ++seq,
-              module: mod.name,
-              sub_module: sub.name,
-              function: func.name,
-              sub_function: leaf.name,
-              description: leaf.description ?? "",
-              category: "feature",
-              trades: {},
-              remark: "",
+              seq: ++seq, module: node.name, sub_module: node.name,
+              function: node.name, sub_function: node.name, description: desc,
+              trades: {}, remark: "",
             });
-          }
+            return;
+          case "sub_module":
+            rows.push({
+              seq: ++seq, module: modName, sub_module: node.name,
+              function: node.name, sub_function: node.name, description: desc,
+              trades: {}, remark: "",
+            });
+            return;
+          case "function":
+            rows.push({
+              seq: ++seq, module: modName, sub_module: subName,
+              function: node.name, sub_function: node.name, description: desc,
+              trades: {}, remark: "",
+            });
+            return;
+          case "leaf":
+            rows.push({
+              seq: ++seq, module: modName, sub_module: subName,
+              function: funcName, sub_function: node.name, description: desc,
+              trades: {}, remark: "",
+            });
+            return;
         }
       }
-    }
 
-    // Support domain modules (no children): single placeholder row
-    for (const mod of this.root) {
-      if (mod.children.length === 0) {
+      // Feature leaf node: emit row
+      if (node.type === "leaf") {
         rows.push({
           seq: ++seq,
-          module: mod.name,
-          sub_module: mod.name,
-          function: mod.name,
-          sub_function: mod.name,
-          description: mod.name,
-          category: "design",
+          module: modName,
+          sub_module: subName,
+          function: funcName,
+          sub_function: node.name,
+          description: node.description ?? "",
           trades: {},
           remark: "",
         });
+        return;
       }
+
+      // Feature interior node: recurse into children
+      for (const child of node.children) {
+        if (node.type === "module") {
+          traverse(child, node.name, "", "");
+        } else if (node.type === "sub_module") {
+          traverse(child, modName, node.name, "");
+        } else if (node.type === "function") {
+          traverse(child, modName, subName, node.name);
+        }
+      }
+    };
+
+    for (const mod of this.root) {
+      traverse(mod, mod.name, "", "");
     }
 
     return rows;
@@ -172,51 +224,61 @@ export class DecomposerTree {
   // Level-scoped flattened views
   // -----------------------------------------------------------------------
 
-  /** Get all module nodes (level 1). */
+  /** Get all module nodes (level 1), filtering out support modules. */
   getModules(): TreeNode[] {
-    return this.root;
+    return this.root.filter((m) => m.category !== "support");
   }
 
   getModuleNames(): string[] {
-    return this.root.map((m) => m.name);
+    return this.root.filter((m) => m.category !== "support").map((m) => m.name);
   }
 
   getSubModulePairs(): { module: string; sub_module: string }[] {
     const pairs: { module: string; sub_module: string }[] = [];
     for (const mod of this.root) {
+      if (mod.category === "support") continue;
       for (const sub of mod.children) {
+        if (sub.category === "support") continue;
         pairs.push({ module: mod.name, sub_module: sub.name });
       }
     }
     return pairs;
   }
 
-  /** Flatten nodes at level for prompt display. */
+  /** Flatten nodes at level for prompt display. Skips support nodes. */
   getRowsAtLevel(level: number): LevelRow[] {
     const rows: LevelRow[] = [];
 
     if (level === 1) {
       for (const mod of this.root) {
+        if (mod.category === "support") continue;
         rows.push({ id: mod.id, module: mod.name, sub_module: null, function: null, sub_function: null, description: null });
       }
       return rows;
     }
 
     for (const mod of this.root) {
+      if (mod.category === "support") continue;
       if (level === 2) {
         for (const sub of mod.children) {
+          if (sub.category === "support") continue;
           rows.push({ id: sub.id, module: mod.name, sub_module: sub.name, function: null, sub_function: null, description: null });
         }
       } else if (level === 3) {
         for (const sub of mod.children) {
+          if (sub.category === "support") continue;
           for (const func of sub.children) {
+            if (func.category === "support") continue;
             rows.push({ id: func.id, module: mod.name, sub_module: sub.name, function: func.name, sub_function: null, description: null });
           }
         }
       } else if (level === 4) {
         for (const sub of mod.children) {
+          if (sub.category === "support") continue;
           for (const func of sub.children) {
+            if (func.category === "support") continue;
             for (const leaf of func.children) {
+              if (leaf.category === "support") continue;
               rows.push({ id: leaf.id, module: mod.name, sub_module: sub.name, function: func.name, sub_function: leaf.name, description: leaf.description });
             }
           }
@@ -236,7 +298,9 @@ export class DecomposerTree {
 
     const rows: LevelRow[] = [];
     for (const mod of this.root) {
+      if (mod.category === "support") continue;
       for (const sub of mod.children) {
+        if (sub.category === "support") continue;
         if (!changes.affectedSubModules.has(subKey(mod.name, sub.name))) continue;
         rows.push({ id: sub.id, module: mod.name, sub_module: sub.name, function: null, sub_function: null, description: null });
       }
@@ -260,10 +324,12 @@ export class DecomposerTree {
 
     const rows: LevelRow[] = [];
     for (const func of sub.children) {
+      if (func.category === "support") continue;
       if (prunedFunctionKeys && !prunedFunctionKeys.has(funcKey(module, subModule, func.name))) continue;
       rows.push({ id: func.id, module, sub_module: subModule, function: func.name, sub_function: null, description: null });
       // Also include existing leaf rows under this function
       for (const leaf of func.children) {
+        if (leaf.category === "support") continue;
         rows.push({ id: leaf.id, module, sub_module: subModule, function: func.name, sub_function: leaf.name, description: leaf.description });
       }
     }
@@ -473,6 +539,53 @@ export class DecomposerTree {
   }
 
   // -----------------------------------------------------------------------
+  // Mark support — set category, remove children, null description if not leaf
+  // -----------------------------------------------------------------------
+
+  markModuleSupport(name: string): void {
+    const mod = this.root.find((m) => m.name === name);
+    if (!mod) throw new Error(`Module "${name}" not found`);
+    mod.category = "support";
+    mod.description = null;
+    this.removeNodeChildren(mod);
+  }
+
+  markSubModuleSupport(module: string, sub: string): void {
+    const mod = this.root.find((m) => m.name === module);
+    if (!mod) throw new Error(`Module "${module}" not found`);
+    const s = mod.children.find((c) => c.name === sub);
+    if (!s) throw new Error(`Sub-module "${sub}" not found in module "${module}"`);
+    s.category = "support";
+    s.description = null;
+    this.removeNodeChildren(s);
+  }
+
+  markFunctionSupport(module: string, sub: string, func: string): void {
+    const mod = this.root.find((m) => m.name === module);
+    if (!mod) throw new Error(`Module "${module}" not found`);
+    const s = mod.children.find((c) => c.name === sub);
+    if (!s) throw new Error(`Sub-module "${sub}" not found`);
+    const f = s.children.find((c) => c.name === func);
+    if (!f) throw new Error(`Function "${func}" not found`);
+    f.category = "support";
+    f.description = null;
+    this.removeNodeChildren(f);
+  }
+
+  markSubFunctionSupport(module: string, sub: string, func: string, leaf: string): void {
+    const mod = this.root.find((m) => m.name === module);
+    if (!mod) throw new Error(`Module "${module}" not found`);
+    const s = mod.children.find((c) => c.name === sub);
+    if (!s) throw new Error(`Sub-module "${sub}" not found`);
+    const f = s.children.find((c) => c.name === func);
+    if (!f) throw new Error(`Function "${func}" not found`);
+    const l = f.children.find((c) => c.name === leaf);
+    if (!l) throw new Error(`Leaf "${leaf}" not found`);
+    l.category = "support";
+    this.removeNodeChildren(l);
+  }
+
+  // -----------------------------------------------------------------------
   // Cascade remove
   // -----------------------------------------------------------------------
 
@@ -483,6 +596,13 @@ export class DecomposerTree {
     }
   }
 
+  private removeNodeChildren(node: TreeNode): void {
+    for (const child of node.children) {
+      this.removeNode(child);
+    }
+    node.children = [];
+  }
+
   // -----------------------------------------------------------------------
   // Snapshots — for diff-based change tracking
   // -----------------------------------------------------------------------
@@ -491,21 +611,33 @@ export class DecomposerTree {
     const snap = new Map<number, string>();
 
     if (level === 1) {
-      for (const mod of this.root) snap.set(mod.id, mod.name);
+      for (const mod of this.root) {
+        if (mod.category === "support") continue;
+        snap.set(mod.id, mod.name);
+      }
       return snap;
     }
 
     if (level === 2) {
       for (const mod of this.root) {
-        for (const sub of mod.children) snap.set(sub.id, `${mod.name}::${sub.name}`);
+        if (mod.category === "support") continue;
+        for (const sub of mod.children) {
+          if (sub.category === "support") continue;
+          snap.set(sub.id, `${mod.name}::${sub.name}`);
+        }
       }
       return snap;
     }
 
     if (level === 3) {
       for (const mod of this.root) {
+        if (mod.category === "support") continue;
         for (const sub of mod.children) {
-          for (const func of sub.children) snap.set(func.id, `${mod.name}::${sub.name}::${func.name}`);
+          if (sub.category === "support") continue;
+          for (const func of sub.children) {
+            if (func.category === "support") continue;
+            snap.set(func.id, `${mod.name}::${sub.name}::${func.name}`);
+          }
         }
       }
       return snap;
@@ -514,15 +646,17 @@ export class DecomposerTree {
     // level 4 — optionally filtered to a sub_module
     if (level === 4) {
       const mods = filter
-        ? this.root.filter((m) => m.name === filter.module)
-        : this.root;
+        ? this.root.filter((m) => m.name === filter.module && m.category !== "support")
+        : this.root.filter((m) => m.category !== "support");
       for (const mod of mods) {
         const subs = filter
-          ? mod.children.filter((s) => s.name === filter.subModule)
-          : mod.children;
+          ? mod.children.filter((s) => s.name === filter.subModule && s.category !== "support")
+          : mod.children.filter((s) => s.category !== "support");
         for (const sub of subs) {
           for (const func of sub.children) {
+            if (func.category === "support") continue;
             for (const leaf of func.children) {
+              if (leaf.category === "support") continue;
               snap.set(leaf.id, `${mod.name}::${sub.name}::${func.name}::${leaf.name}||${leaf.description ?? ""}`);
             }
           }

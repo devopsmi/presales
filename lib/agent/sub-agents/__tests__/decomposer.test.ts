@@ -168,7 +168,6 @@ interface QRow {
   function: string;
   sub_function: string;
   description: string;
-  category: string;
   trades: Record<string, number | null>;
   remark: string;
 }
@@ -498,7 +497,7 @@ test("rejects empty result (no leaves)", () => {
 console.log("\nScoped formatters");
 
 function makeRow(mod: string, sub: string, func: string, subFunc: string): QRow {
-  return { seq: 0, module: mod, sub_module: sub, function: func, sub_function: subFunc, description: "desc", category: "feature", trades: {}, remark: "" };
+  return { seq: 0, module: mod, sub_module: sub, function: func, sub_function: subFunc, description: "desc", trades: {}, remark: "" };
 }
 
 const sampleRows: QRow[] = [

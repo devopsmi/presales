@@ -418,6 +418,34 @@ export function buildR3Tools(table: DecomposerTree) {
         }),
       },
     ),
+
+    tool(
+      async ({
+        module,
+        sub_module,
+        function: funcName,
+      }: {
+        module: string;
+        sub_module: string;
+        function: string;
+      }) => {
+        table.markFunctionSupport(module, sub_module, funcName);
+        return JSON.stringify({
+          success: true,
+          text: `已将功能点"${module} → ${sub_module} → ${funcName}"标记为支撑域（非代码交付），已移除其下所有子节点。`,
+        });
+      },
+      {
+        name: "mark_function_support",
+        description:
+          "标记一个功能点为支撑域（非代码交付范畴）。标记后该功能点的所有子节点（子功能）将被清除。",
+        schema: z.object({
+          module: z.string().describe("父模块名"),
+          sub_module: z.string().describe("子模块名"),
+          function: z.string().describe("要标记为支撑域的功能名"),
+        }),
+      },
+    ),
   ];
 }
 
@@ -625,6 +653,37 @@ export function buildR4Tools(table: DecomposerTree) {
           function: z.string().describe("功能名"),
           old_name: z.string().describe("当前子功能名"),
           new_name: z.string().describe("新的子功能名"),
+        }),
+      },
+    ),
+
+    tool(
+      async ({
+        module,
+        sub_module,
+        function: funcName,
+        sub_function,
+      }: {
+        module: string;
+        sub_module: string;
+        function: string;
+        sub_function: string;
+      }) => {
+        table.markSubFunctionSupport(module, sub_module, funcName, sub_function);
+        return JSON.stringify({
+          success: true,
+          text: `已将子功能"${module} → ${sub_module} → ${funcName} → ${sub_function}"标记为支撑域（非代码交付）。`,
+        });
+      },
+      {
+        name: "mark_sub_function_support",
+        description:
+          "标记一个子功能为支撑域（非代码交付范畴）。通常用于标记纯文档/设计类输出。",
+        schema: z.object({
+          module: z.string().describe("父模块名"),
+          sub_module: z.string().describe("子模块名"),
+          function: z.string().describe("功能名"),
+          sub_function: z.string().describe("要标记为支撑域的子功能名"),
         }),
       },
     ),

@@ -52,7 +52,8 @@ export function buildReadRowsTool(rows: QuotationRow[]) {
       const isOverview = !module && !sub_module;
 
       const lines = filtered.map(r => {
-        const prefix = `[${r.category === "design" ? "设计" : "功能"}] ${r.module}` +
+        const isSupport = r.function === r.sub_function;
+        const prefix = `[${isSupport ? "设计" : "功能"}] ${r.module}` +
           ` → ${r.sub_module} → ${r.function}` +
           (r.sub_function ? ` → ${r.sub_function}` : "");
         if (isOverview) return prefix;

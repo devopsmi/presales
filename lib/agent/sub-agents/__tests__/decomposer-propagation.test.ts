@@ -65,7 +65,6 @@ function makeMockRow(
     function: func,
     sub_function,
     description: `desc for ${sub_function}`,
-    category: "feature",
     trades: {},
     remark: "",
   };
