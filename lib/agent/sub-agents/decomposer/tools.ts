@@ -11,7 +11,7 @@
  */
 import { tool, createMiddleware } from "langchain";
 import { z } from "zod";
-import { DecomposerTable } from "./table";
+import { DecomposerTree } from "./table";
 import type { LevelRow } from "./table";
 import log from "@/lib/logger";
 
@@ -36,7 +36,7 @@ function formatLevelRows(rows: LevelRow[], level: number): string {
 
   const lines: string[] = [];
   for (const r of rows) {
-    const parts: string[] = [`[${r.index}]`];
+    const parts: string[] = [`[${r.id}]`];
     parts.push(r.module);
     if (level >= 2) parts.push(`→ ${r.sub_module}`);
     if (level >= 3) parts.push(`→ ${r.function}`);
@@ -97,11 +97,11 @@ function formatFunctionRows(
 // R1 Tools — module level
 // ---------------------------------------------------------------------------
 
-export function buildR1Tools(table: DecomposerTable) {
+export function buildR1Tools(table: DecomposerTree) {
   return [
     tool(
       async () => {
-        const modules = table.getModules();
+        const modules = table.getModuleNames();
         return JSON.stringify({
           count: modules.length,
           modules,
@@ -118,7 +118,7 @@ export function buildR1Tools(table: DecomposerTable) {
     tool(
       async ({ modules }: { modules: string[] }) => {
         const indices = table.addModules(modules);
-        const allModules = table.getModules();
+        const allModules = table.getModuleNames();
         return JSON.stringify({
           added: indices.length,
           total: allModules.length,
@@ -141,7 +141,7 @@ export function buildR1Tools(table: DecomposerTable) {
     tool(
       async ({ modules }: { modules: string[] }) => {
         table.deleteModules(modules);
-        const remaining = table.getModules();
+        const remaining = table.getModuleNames();
         return JSON.stringify({
           deleted: modules.length,
           remaining: remaining.length,
@@ -185,11 +185,11 @@ export function buildR1Tools(table: DecomposerTable) {
 // R2 Tools — sub_module level
 // ---------------------------------------------------------------------------
 
-export function buildR2Tools(table: DecomposerTable) {
+export function buildR2Tools(table: DecomposerTree) {
   return [
     tool(
       async () => {
-        const subs = table.getSubModules();
+        const subs = table.getSubModulePairs();
         return JSON.stringify({
           count: subs.length,
           text: formatSubModuleRows(subs),
@@ -212,7 +212,7 @@ export function buildR2Tools(table: DecomposerTable) {
         sub_modules: string[];
       }) => {
         const indices = table.addSubModules(module, sub_modules);
-        const all = table.getSubModules();
+        const all = table.getSubModulePairs();
         return JSON.stringify({
           added: indices.length,
           module,
@@ -241,7 +241,7 @@ export function buildR2Tools(table: DecomposerTable) {
         sub_modules: string[];
       }) => {
         table.deleteSubModules(module, sub_modules);
-        const remaining = table.getSubModules();
+        const remaining = table.getSubModulePairs();
         return JSON.stringify({
           deleted: sub_modules.length,
           module,
@@ -294,7 +294,7 @@ export function buildR2Tools(table: DecomposerTable) {
 // R3 Tools — function level
 // ---------------------------------------------------------------------------
 
-export function buildR3Tools(table: DecomposerTable) {
+export function buildR3Tools(table: DecomposerTree) {
   return [
     tool(
       async () => {
@@ -425,7 +425,7 @@ export function buildR3Tools(table: DecomposerTable) {
 // R4 Tools — sub_function + description level
 // ---------------------------------------------------------------------------
 
-export function buildR4Tools(table: DecomposerTable) {
+export function buildR4Tools(table: DecomposerTree) {
   return [
     tool(
       async ({
@@ -443,7 +443,7 @@ export function buildR4Tools(table: DecomposerTable) {
               (!sub_module || r.sub_module === sub_module),
           )
           .map((r) => ({
-            index: r.index,
+            id: r.id,
             module: r.module,
             sub_module: r.sub_module,
             function: r.function,
@@ -651,29 +651,29 @@ function formatToolArgs(args: Record<string, unknown>): string {
 }
 
 export function createDecomposerToolMiddleware(
-  agentName: string,
-  table: DecomposerTable,
+  agentLabel: string,
+  table: DecomposerTree,
   level: number,
-  logger: ReturnType<typeof log.child>,
+  agentLogger: ReturnType<typeof log.child>,
 ) {
   let callN = 0;
 
   return createMiddleware({
-    name: `ToolLogger_${agentName}`,
+    name: `ToolLogger_${agentLabel}`,
     wrapToolCall: async (request: any, handler: any) => {
       callN++;
       const toolName: string = request.toolCall.name;
       const args = (request.toolCall.args ?? {}) as Record<string, unknown>;
       const t0 = Date.now();
 
-      logger.info(`  ⚙ #${callN} ${toolName}${formatToolArgs(args)}`);
+      agentLogger.info(`  ⚙ #${callN} ${toolName}${formatToolArgs(args)}`);
 
       const result = await handler(request);
       const dur = Date.now() - t0;
 
-      logger.info(
+      agentLogger.info(
         `  ↳ #${callN} done (${dur}ms)\n` +
-        table.formatTableForLevel(level),
+        table.formatTreeForLevel(level),
       );
 
       return result;

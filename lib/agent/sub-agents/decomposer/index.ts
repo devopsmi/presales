@@ -3,7 +3,7 @@
  *
  * Unlike the old pipeline (4 LLM calls outputting full-layer JSON), each round
  * is now a LangChain agent with level-scoped CRUD tools operating on a shared
- * DecomposerTable. Full decomposition and modification rounds share the same
+ * DecomposerTree. Full decomposition and modification rounds share the same
  * code path — the difference is purely whether the table starts empty or
  * populated from previousRows.
  *
@@ -21,7 +21,7 @@ import type { DecomposerOutput } from "@/lib/agent/state";
 import type { QuotationRow } from "@/lib/types";
 import { getSessionConfig } from "@/lib/session-config";
 import { resolvePrompt } from "@/lib/prompt-defaults";
-import { DecomposerTable, type RoundChangeSet, type LevelRow } from "./table";
+import { DecomposerTree, type RoundChangeSet, type LevelRow } from "./table";
 import {
   runR1Agent,
   runR2Agent,
@@ -91,7 +91,7 @@ export async function runDecomposer(
   });
 
   // 1. Initialize table
-  const table = DecomposerTable.fromPreviousRows(input.previousRows);
+  const table = DecomposerTree.fromPreviousRows(input.previousRows);
 
   // 2. Track changes per round for downstream pruning
   const roundChanges: (RoundChangeSet | null)[] = [null, null, null, null, null]; // 1-indexed
@@ -119,9 +119,9 @@ export async function runDecomposer(
 
         result = await runR1Agent(model, table, brief, systemPrompt, instruction);
 
-        roundChanges[1] = table.buildChangeSet(result.changedIndices);
+        roundChanges[1] = table.buildChangeSet(result.changedIds);
 
-        const modules = table.getModules();
+        const modules = table.getModuleNames();
         onProgress?.({
           stage: "识别产品模块",
           round: 1,
@@ -143,7 +143,7 @@ export async function runDecomposer(
 
         result = await runR2Agent(model, table, brief, systemPrompt, instruction);
 
-        roundChanges[2] = table.buildChangeSet(result.changedIndices);
+        roundChanges[2] = table.buildChangeSet(result.changedIds);
 
         const r2Count = table.getRowsAtLevel(2).length;
         onProgress?.({
@@ -180,7 +180,7 @@ export async function runDecomposer(
 
         result = await runR3Agent(model, table, brief, contextRows, systemPrompt, instruction);
 
-        roundChanges[3] = table.buildChangeSet(result.changedIndices);
+        roundChanges[3] = table.buildChangeSet(result.changedIds);
 
         const r3Count = table.getRowsAtLevel(3).length;
         onProgress?.({
@@ -220,6 +220,7 @@ export async function runDecomposer(
 
         // Build R4 tasks: one per sub_module invocation
         const r4Tasks: Array<{
+          index: number;
           module: string;
           subModule: string;
           rows: LevelRow[];
@@ -245,37 +246,77 @@ export async function runDecomposer(
 
           if (rows.length === 0) continue;
 
-          r4Tasks.push({ module, subModule, rows });
+          r4Tasks.push({ index: r4Tasks.length + 1, module, subModule, rows });
         }
 
         // Fire parallel R4 calls
-        const r4Promises = r4Tasks.map(async ({ module, subModule, rows }) => {
+        const totalR4 = r4Tasks.length;
+        const r4Promises = r4Tasks.map(async ({ index, module, subModule, rows }) => {
           const taskInstruction = hasInstruction ? instruction : undefined;
-          const r4Result = await runR4AgentForSubModule(
-            model,
-            table,
-            module,
-            subModule,
-            rows,
-            brief,
-            systemPrompt,
-            taskInstruction,
-          );
-          return { module, subModule, ...r4Result };
+          try {
+            const r4Result = await runR4AgentForSubModule(
+              model,
+              table,
+              module,
+              subModule,
+              rows,
+              brief,
+              systemPrompt,
+              taskInstruction,
+              index,
+              totalR4,
+            );
+            return { module, subModule, ...r4Result };
+          } catch (err) {
+            const enriched = new Error(
+              `R4[${module}→${subModule}]: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            (enriched as any).module = module;
+            (enriched as any).subModule = subModule;
+            throw enriched;
+          }
         });
 
-        const r4AllResults = await Promise.all(r4Promises);
+        const r4Settled = await Promise.allSettled(r4Promises);
 
-        // Merge all R4 changes
-        const allChangedIndices = r4AllResults.flatMap((r) => r.changedIndices);
-        roundChanges[4] = table.buildChangeSet(allChangedIndices);
+        const r4AllResults: Array<{
+          module: string;
+          subModule: string;
+          changedIds: number[];
+          rowCount: number;
+        }> = [];
+        const r4Failures: string[] = [];
+
+        for (const entry of r4Settled) {
+          if (entry.status === "fulfilled") {
+            r4AllResults.push(entry.value);
+          } else {
+            const mod = (entry.reason as any)?.module ?? "?";
+            const sub = (entry.reason as any)?.subModule ?? "?";
+            const errMsg = entry.reason instanceof Error ? entry.reason.message : String(entry.reason);
+            r4Failures.push(`${mod}→${sub}`);
+            logger.warn(`R4 task failed for ${mod}→${sub}`, { error: errMsg });
+          }
+        }
+
+        if (r4Failures.length > 0) {
+          logger.warn(`${r4Failures.length}/${r4Settled.length} R4 tasks failed: ${r4Failures.join(", ")}`);
+        }
+        if (r4AllResults.length === 0 && r4Settled.length > 0) {
+          throw new Error("All R4 sub-module tasks failed — cannot produce complete quotation");
+        }
+
+        const allChangedIds = r4AllResults.flatMap((r) => r.changedIds);
+        roundChanges[4] = table.buildChangeSet(allChangedIds);
 
         const r4TriplesCount = r4AllResults.reduce((sum, r) => sum + r.rowCount, 0);
         onProgress?.({
           stage: "生成子功能详情",
           round: 4,
           totalRounds: 4,
-          message: `已生成 ${r4TriplesCount} 个子功能（${r4Tasks.length} 块并行）`,
+          message: r4Failures.length > 0
+            ? `已生成 ${r4TriplesCount} 个子功能（${r4AllResults.length}/${r4Settled.length} 块成功，${r4Failures.length} 失败）`
+            : `已生成 ${r4TriplesCount} 个子功能（${r4Tasks.length} 块并行）`,
         });
         break;
       }
@@ -288,7 +329,7 @@ export async function runDecomposer(
   if (rows.length === 0) {
     logger.warn("decomposer produced empty result", {
       totalRows: table.buildLevelSnapshot(4).size,
-      moduleCount: table.getModules().length,
+      moduleCount: table.getModuleNames().length,
       startRound,
     });
   }

@@ -1,31 +1,25 @@
-/**
- * DecomposerTable — shared mutable table across R1→R4 agents.
- *
- * Each row has a stable `index` (natural number, never changes).
- * Columns fill progressively: R1 fills `module`, R2 fills `sub_module`,
- * R3 fills `function`, R4 fills `sub_function` + `description`.
- *
- * Modification rounds: table starts from previousRows.
- * Full decomposition: table starts empty, agents populate it level by level.
- */
 import type { QuotationRow } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
-// Internal row type — all columns nullable except index
+// TreeNode
 // ---------------------------------------------------------------------------
 
-export interface DecomposerRow {
-  index: number;
-  module: string | null;
-  sub_module: string | null;
-  function: string | null;
-  sub_function: string | null;
-  description: string | null;
+export type NodeType = "module" | "sub_module" | "function" | "leaf";
+
+export interface TreeNode {
+  id: number;
+  type: NodeType;
+  name: string;
+  description: string | null; // only for leaf nodes
+  children: TreeNode[];
 }
 
-/** Minimal visible row for a given level (only columns up to that level). */
+// ---------------------------------------------------------------------------
+// LevelRow — flattened view for prompt builders
+// ---------------------------------------------------------------------------
+
 export interface LevelRow {
-  index: number;
+  id: number;
   module: string;
   sub_module: string | null;
   function: string | null;
@@ -34,579 +28,583 @@ export interface LevelRow {
 }
 
 // ---------------------------------------------------------------------------
-// Change tracking — for pruning downstream rounds
+// RoundChangeSet
 // ---------------------------------------------------------------------------
 
 export interface RoundChangeSet {
-  /** Indices of rows whose level-N column was added or modified. */
-  affectedIndices: Set<number>;
-  /** (module, sub_module) pairs affected — for R3 pruning. */
-  affectedSubModules: Set<string>;
-  /** (module, sub_module, function) triples affected — for R4 pruning. */
-  affectedFunctions: Set<string>;
+  affectedIds: Set<number>;
+  affectedSubModules: Set<string>; // "module::sub_module"
+  affectedFunctions: Set<string>;   // "module::sub_module::function"
 }
 
-function makeSubModuleKey(module: string, sub: string): string {
-  return `${module}::${sub}`;
-}
-
-function makeFunctionKey(module: string, sub: string, func: string): string {
-  return `${module}::${sub}::${func}`;
-}
+function subKey(mod: string, sub: string): string { return `${mod}::${sub}`; }
+function funcKey(mod: string, sub: string, fn: string): string { return `${mod}::${sub}::${fn}`; }
 
 // ---------------------------------------------------------------------------
-// DecomposerTable
+// Snapshot helpers
 // ---------------------------------------------------------------------------
 
-export class DecomposerTable {
-  private rows: DecomposerRow[] = [];
-  private nextIndex = 1;
+type L1Snap = Map<number, string>;                   // id → moduleName
+type L2Snap = Map<number, { name: string; modName: string }>;
+type L3Snap = Map<number, { name: string; modName: string; subName: string }>;
+type L4Snap = Map<number, { name: string; description: string; modName: string; subName: string; funcName: string }>;
+
+// ---------------------------------------------------------------------------
+// DecomposerTree
+// ---------------------------------------------------------------------------
+
+export class DecomposerTree {
+  private root: TreeNode[] = [];
+  private nextId = 1;
+  private idMap = new Map<number, TreeNode>();
 
   // -----------------------------------------------------------------------
-  // Factory: initialize from previous decomposition (modification round)
+  // Factory
   // -----------------------------------------------------------------------
 
-  static fromPreviousRows(previousRows?: QuotationRow[]): DecomposerTable {
-    const table = new DecomposerTable();
-    if (!previousRows?.length) return table;
+  static fromPreviousRows(previousRows?: QuotationRow[]): DecomposerTree {
+    const tree = new DecomposerTree();
+    if (!previousRows?.length) return tree;
+
+    const modCache = new Map<string, TreeNode>();
+    const subCache = new Map<string, TreeNode>();
+    const funcCache = new Map<string, TreeNode>();
 
     for (const row of previousRows) {
-      table.rows.push({
-        index: table.nextIndex++,
-        module: row.module,
-        sub_module: row.sub_module,
-        function: row.function,
-        sub_function: row.sub_function,
+      let mod = modCache.get(row.module);
+      if (!mod) {
+        mod = { id: tree.nextId++, type: "module", name: row.module, description: null, children: [] };
+        tree.root.push(mod);
+        tree.idMap.set(mod.id, mod);
+        modCache.set(row.module, mod);
+      }
+
+      const subK = `${row.module}::${row.sub_module}`;
+      let sub = subCache.get(subK);
+      if (!sub) {
+        sub = { id: tree.nextId++, type: "sub_module", name: row.sub_module, description: null, children: [] };
+        mod.children.push(sub);
+        tree.idMap.set(sub.id, sub);
+        subCache.set(subK, sub);
+      }
+
+      const funcK = `${subK}::${row.function}`;
+      let func = funcCache.get(funcK);
+      if (!func) {
+        func = { id: tree.nextId++, type: "function", name: row.function, description: null, children: [] };
+        sub.children.push(func);
+        tree.idMap.set(func.id, func);
+        funcCache.set(funcK, func);
+      }
+
+      const leaf: TreeNode = {
+        id: tree.nextId++,
+        type: "leaf",
+        name: row.sub_function,
         description: row.description,
-      });
+        children: [],
+      };
+      func.children.push(leaf);
+      tree.idMap.set(leaf.id, leaf);
     }
-    return table;
+
+    return tree;
   }
 
   // -----------------------------------------------------------------------
-  // Convert to QuotationRow[] — final output, only fully-populated rows
+  // Convert to QuotationRow[]
   // -----------------------------------------------------------------------
 
   toQuotationRows(): QuotationRow[] {
-    const leaves = this.rows.filter(
-      (r) =>
-        r.module != null &&
-        r.sub_module != null &&
-        r.function != null &&
-        r.sub_function != null &&
-        r.description != null,
-    );
+    const rows: QuotationRow[] = [];
+    let seq = 0;
 
-    return leaves.map((r, i) => ({
-      seq: i + 1,
-      module: r.module!,
-      sub_module: r.sub_module!,
-      function: r.function!,
-      sub_function: r.sub_function!,
-      description: r.description!,
-      category: "feature" as const,
-      trades: {},
-      remark: "",
-    }));
-  }
-
-  // -----------------------------------------------------------------------
-  // Diff helper — used by agents to compute true changedIndices
-  // -----------------------------------------------------------------------
-
-  /**
-   * Build a "before" snapshot of this level's column values.
-   * Returns Map<index, columnValue> where columnValue encodes the relevant
-   * column(s) at this level:
-   *   L1: module name
-   *   L2: "module::sub_module"
-   *   L3: "module::sub_module::function"
-   *   L4: "module::sub_module::function::sub_function||description"
-   */
-  buildLevelSnapshot(level: number, filter?: { module: string; subModule: string; functionKeys?: Set<string> }): Map<number, string> {
-    const rows = filter
-      ? this.getRowsForSubModule(filter.module, filter.subModule, filter.functionKeys)
-      : this.getRowsAtLevel(level);
-
-    const snap = new Map<number, string>();
-    for (const r of rows) {
-      let val: string;
-      switch (level) {
-        case 1: val = r.module; break;
-        case 2: val = `${r.module}::${r.sub_module}`; break;
-        case 3: val = `${r.module}::${r.sub_module}::${r.function}`; break;
-        case 4: val = `${r.module}::${r.sub_module}::${r.function}::${r.sub_function}||${r.description ?? ""}`; break;
-        default: val = "";
+    // Core domain modules: leaf-level rows
+    for (const mod of this.root) {
+      for (const sub of mod.children) {
+        for (const func of sub.children) {
+          for (const leaf of func.children) {
+            rows.push({
+              seq: ++seq,
+              module: mod.name,
+              sub_module: sub.name,
+              function: func.name,
+              sub_function: leaf.name,
+              description: leaf.description ?? "",
+              category: "feature",
+              trades: {},
+              remark: "",
+            });
+          }
+        }
       }
-      snap.set(r.index, val);
     }
-    return snap;
-  }
 
-  /**
-   * Diff before vs after snapshots.
-   * Returns indices that are NEW (in after, not before), MODIFIED (in both, value changed),
-   * or DELETED (in before, not after).
-   */
-  static diffSnapshots(before: Map<number, string>, after: Map<number, string>): number[] {
-    const changed = new Set<number>();
-    for (const [idx, val] of after) {
-      if (!before.has(idx) || before.get(idx) !== val) changed.add(idx);
+    // Support domain modules (no children): single placeholder row
+    for (const mod of this.root) {
+      if (mod.children.length === 0) {
+        rows.push({
+          seq: ++seq,
+          module: mod.name,
+          sub_module: mod.name,
+          function: mod.name,
+          sub_function: mod.name,
+          description: mod.name,
+          category: "design",
+          trades: {},
+          remark: "",
+        });
+      }
     }
-    for (const idx of before.keys()) {
-      if (!after.has(idx)) changed.add(idx);
-    }
-    return [...changed];
+
+    return rows;
   }
 
   // -----------------------------------------------------------------------
-  // Level-scoped views
+  // Node lookup
   // -----------------------------------------------------------------------
 
-  /**
-   * Get rows visible at level N (columns 1..N populated, N+1..5 may be null).
-   *
-   * Level 1 (R1 view): rows where module is non-null.
-   * Level 2 (R2 view): rows where module is non-null (sub_module may be null
-   *                    for parent module rows, or non-null for sub_module rows).
-   * Level 3 (R3 view): rows where module AND sub_module are non-null.
-   * Level 4 (R4 view): rows where module, sub_module, function are non-null.
-   */
+  getNode(id: number): TreeNode | undefined {
+    return this.idMap.get(id);
+  }
+
+  // -----------------------------------------------------------------------
+  // Level-scoped flattened views
+  // -----------------------------------------------------------------------
+
+  /** Get all module nodes (level 1). */
+  getModules(): TreeNode[] {
+    return this.root;
+  }
+
+  getModuleNames(): string[] {
+    return this.root.map((m) => m.name);
+  }
+
+  getSubModulePairs(): { module: string; sub_module: string }[] {
+    const pairs: { module: string; sub_module: string }[] = [];
+    for (const mod of this.root) {
+      for (const sub of mod.children) {
+        pairs.push({ module: mod.name, sub_module: sub.name });
+      }
+    }
+    return pairs;
+  }
+
+  /** Flatten nodes at level for prompt display. */
   getRowsAtLevel(level: number): LevelRow[] {
-    return this.rows
-      .filter((r) => {
-        if (r.module == null) return false;
-        if (level >= 2 && r.sub_module == null) return false;
-        if (level >= 3 && r.function == null) return false;
-        if (level >= 4 && r.sub_function == null) return false;
-        return true;
-      })
-      .map((r) => ({
-        index: r.index,
-        module: r.module!,
-        sub_module: r.sub_module,
-        function: r.function,
-        sub_function: r.sub_function,
-        description: r.description,
-      }));
+    const rows: LevelRow[] = [];
+
+    if (level === 1) {
+      for (const mod of this.root) {
+        rows.push({ id: mod.id, module: mod.name, sub_module: null, function: null, sub_function: null, description: null });
+      }
+      return rows;
+    }
+
+    for (const mod of this.root) {
+      if (level === 2) {
+        for (const sub of mod.children) {
+          rows.push({ id: sub.id, module: mod.name, sub_module: sub.name, function: null, sub_function: null, description: null });
+        }
+      } else if (level === 3) {
+        for (const sub of mod.children) {
+          for (const func of sub.children) {
+            rows.push({ id: func.id, module: mod.name, sub_module: sub.name, function: func.name, sub_function: null, description: null });
+          }
+        }
+      } else if (level === 4) {
+        for (const sub of mod.children) {
+          for (const func of sub.children) {
+            for (const leaf of func.children) {
+              rows.push({ id: leaf.id, module: mod.name, sub_module: sub.name, function: func.name, sub_function: leaf.name, description: leaf.description });
+            }
+          }
+        }
+      }
+    }
+
+    return rows;
   }
 
   /**
-   * Get rows at level N, pruned to only those affected by parent round changes.
-   *
-   * For R3 pruning (level=3): only rows whose (module, sub_module) is in changes.
-   * For R4 pruning (level=4): only rows whose (module, sub_module, function) is in changes.
+   * For R3 pruning: return sub_module rows (level 2) whose (module, sub_module)
+   * key is in the parent changeset.
    */
   getRowsAtLevelPruned(level: number, changes: RoundChangeSet): LevelRow[] {
-    return this.rows
-      .filter((r) => {
-        if (r.module == null || r.sub_module == null) return false;
-        if (level === 3) {
-          return r.function == null
-            && changes.affectedSubModules.has(makeSubModuleKey(r.module, r.sub_module));
-        }
-        return false;
-      })
-      .map((r) => ({
-        index: r.index,
-        module: r.module!,
-        sub_module: r.sub_module,
-        function: r.function,
-        sub_function: r.sub_function,
-        description: r.description,
-      }));
+    if (level !== 3) return [];
+
+    const rows: LevelRow[] = [];
+    for (const mod of this.root) {
+      for (const sub of mod.children) {
+        if (!changes.affectedSubModules.has(subKey(mod.name, sub.name))) continue;
+        rows.push({ id: sub.id, module: mod.name, sub_module: sub.name, function: null, sub_function: null, description: null });
+      }
+    }
+    return rows;
   }
 
   /**
-   * Group R3-level rows by sub_module (identified by module + sub_module pair).
-   * Returns Map<subModuleKey, { module, subModule, funcs: LevelRow[] }>
-   */
-  groupBySubModule(rows: LevelRow[]): Map<string, { module: string; subModule: string; funcs: LevelRow[] }> {
-    const map = new Map<string, { module: string; subModule: string; funcs: LevelRow[] }>();
-    for (const r of rows) {
-      const key = makeSubModuleKey(r.module, r.sub_module!);
-      let entry = map.get(key);
-      if (!entry) {
-        entry = { module: r.module, subModule: r.sub_module!, funcs: [] };
-        map.set(key, entry);
-      }
-      entry.funcs.push(r);
-    }
-    return map;
-  }
-
-  // -----------------------------------------------------------------------
-  // R1 CRUD: module level
-  // -----------------------------------------------------------------------
-
-  /** Get distinct modules from the table. */
-  getModules(): string[] {
-    const modules = new Set<string>();
-    for (const r of this.rows) {
-      if (r.module) modules.add(r.module);
-    }
-    return [...modules];
-  }
-
-  addModules(moduleNames: string[]): number[] {
-    const indices: number[] = [];
-    for (const name of moduleNames) {
-      const trimmed = name.trim();
-      if (!trimmed) continue;
-      // Avoid duplicating existing modules (case-insensitive check)
-      const existing = this.rows.find(
-        (r) => r.module?.toLowerCase() === trimmed.toLowerCase(),
-      );
-      if (existing) continue;
-      const idx = this.nextIndex++;
-      this.rows.push({
-        index: idx,
-        module: trimmed,
-        sub_module: null,
-        function: null,
-        sub_function: null,
-        description: null,
-      });
-      indices.push(idx);
-    }
-    return indices;
-  }
-
-  deleteModules(moduleNames: string[]): void {
-    for (const name of moduleNames) {
-      const trimmed = name.trim();
-      // Cascade: delete all rows with this module
-      this.rows = this.rows.filter(
-        (r) => r.module !== trimmed,
-      );
-    }
-  }
-
-  renameModule(oldName: string, newName: string): void {
-    const trimmed = newName.trim();
-    for (const r of this.rows) {
-      if (r.module === oldName) {
-        r.module = trimmed;
-      }
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // R2 CRUD: sub_module level
-  // -----------------------------------------------------------------------
-
-  /**
-   * Get distinct (module, sub_module) pairs for existing sub_module rows.
-   * For the R2 agent's view during full decomposition, there are no sub_module
-   * rows yet — it sees the module rows and creates sub_module rows.
-   */
-  getSubModules(): { module: string; sub_module: string }[] {
-    const seen = new Set<string>();
-    const result: { module: string; sub_module: string }[] = [];
-    for (const r of this.rows) {
-      if (r.module && r.sub_module) {
-        const key = makeSubModuleKey(r.module, r.sub_module);
-        if (!seen.has(key)) {
-          seen.add(key);
-          result.push({ module: r.module, sub_module: r.sub_module });
-        }
-      }
-    }
-    return result;
-  }
-
-  addSubModules(module: string, subModuleNames: string[]): number[] {
-    const indices: number[] = [];
-    // Verify module exists
-    if (!this.rows.some((r) => r.module === module)) {
-      throw new Error(`Cannot add sub-modules: module "${module}" does not exist`);
-    }
-    for (const name of subModuleNames) {
-      const trimmed = name.trim();
-      if (!trimmed) continue;
-      // Avoid duplicating existing sub_modules under this module
-      const existing = this.rows.find(
-        (r) => r.module === module && r.sub_module === trimmed,
-      );
-      if (existing) continue;
-      const idx = this.nextIndex++;
-      this.rows.push({
-        index: idx,
-        module,
-        sub_module: trimmed,
-        function: null,
-        sub_function: null,
-        description: null,
-      });
-      indices.push(idx);
-    }
-    return indices;
-  }
-
-  deleteSubModules(module: string, subModuleNames: string[]): void {
-    for (const name of subModuleNames) {
-      // Cascade: delete all rows with this module + sub_module
-      this.rows = this.rows.filter(
-        (r) => !(r.module === module && r.sub_module === name.trim()),
-      );
-    }
-  }
-
-  renameSubModule(module: string, oldName: string, newName: string): void {
-    const trimmed = newName.trim();
-    for (const r of this.rows) {
-      if (r.module === module && r.sub_module === oldName) {
-        r.sub_module = trimmed;
-      }
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // R3 CRUD: function level
-  // -----------------------------------------------------------------------
-
-  addFunctions(module: string, subModule: string, functionNames: string[]): number[] {
-    const indices: number[] = [];
-    // Verify sub_module exists
-    if (
-      !this.rows.some((r) => r.module === module && r.sub_module === subModule)
-    ) {
-      throw new Error(
-        `Cannot add functions: sub_module "${module} → ${subModule}" does not exist`,
-      );
-    }
-    for (const name of functionNames) {
-      const trimmed = name.trim();
-      if (!trimmed) continue;
-      const existing = this.rows.find(
-        (r) =>
-          r.module === module &&
-          r.sub_module === subModule &&
-          r.function === trimmed,
-      );
-      if (existing) continue;
-      const idx = this.nextIndex++;
-      this.rows.push({
-        index: idx,
-        module,
-        sub_module: subModule,
-        function: trimmed,
-        sub_function: null,
-        description: null,
-      });
-      indices.push(idx);
-    }
-    return indices;
-  }
-
-  deleteFunctions(module: string, subModule: string, functionNames: string[]): void {
-    for (const name of functionNames) {
-      this.rows = this.rows.filter(
-        (r) =>
-          !(
-            r.module === module &&
-            r.sub_module === subModule &&
-            r.function === name.trim()
-          ),
-      );
-    }
-  }
-
-  renameFunction(
-    module: string,
-    subModule: string,
-    oldName: string,
-    newName: string,
-  ): void {
-    const trimmed = newName.trim();
-    for (const r of this.rows) {
-      if (
-        r.module === module &&
-        r.sub_module === subModule &&
-        r.function === oldName
-      ) {
-        r.function = trimmed;
-      }
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // R4 CRUD: sub_function + description level
-  // -----------------------------------------------------------------------
-
-  addLeaves(
-    module: string,
-    subModule: string,
-    funcName: string,
-    leaves: { sub_function: string; description: string }[],
-  ): number[] {
-    const indices: number[] = [];
-    // Verify function exists
-    if (
-      !this.rows.some(
-        (r) =>
-          r.module === module &&
-          r.sub_module === subModule &&
-          r.function === funcName,
-      )
-    ) {
-      throw new Error(
-        `Cannot add leaves: function "${module} → ${subModule} → ${funcName}" does not exist`,
-      );
-    }
-    for (const leaf of leaves) {
-      const trimmedSub = leaf.sub_function.trim();
-      const trimmedDesc = leaf.description.trim();
-      if (!trimmedSub || !trimmedDesc) continue;
-      const idx = this.nextIndex++;
-      this.rows.push({
-        index: idx,
-        module,
-        sub_module: subModule,
-        function: funcName,
-        sub_function: trimmedSub,
-        description: trimmedDesc,
-      });
-      indices.push(idx);
-    }
-    return indices;
-  }
-
-  deleteLeaves(
-    module: string,
-    subModule: string,
-    funcName: string,
-    subFunctionNames: string[],
-  ): void {
-    for (const name of subFunctionNames) {
-      this.rows = this.rows.filter(
-        (r) =>
-          !(
-            r.module === module &&
-            r.sub_module === subModule &&
-            r.function === funcName &&
-            r.sub_function === name.trim()
-          ),
-      );
-    }
-  }
-
-  updateLeafDescription(
-    module: string,
-    subModule: string,
-    funcName: string,
-    subFuncName: string,
-    newDescription: string,
-  ): void {
-    for (const r of this.rows) {
-      if (
-        r.module === module &&
-        r.sub_module === subModule &&
-        r.function === funcName &&
-        r.sub_function === subFuncName
-      ) {
-        r.description = newDescription.trim();
-        return;
-      }
-    }
-    throw new Error(
-      `Cannot update description: leaf "${module} → ${subModule} → ${funcName} → ${subFuncName}" not found`,
-    );
-  }
-
-  renameSubFunction(
-    module: string,
-    subModule: string,
-    funcName: string,
-    oldName: string,
-    newName: string,
-  ): void {
-    for (const r of this.rows) {
-      if (
-        r.module === module &&
-        r.sub_module === subModule &&
-        r.function === funcName &&
-        r.sub_function === oldName
-      ) {
-        r.sub_function = newName.trim();
-        return;
-      }
-    }
-    throw new Error(
-      `Cannot rename sub_function: "${module} → ${subModule} → ${funcName} → ${oldName}" not found`,
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Change tracking helpers
-  // -----------------------------------------------------------------------
-
-  buildChangeSet(indices: number[]): RoundChangeSet {
-    const cs: RoundChangeSet = {
-      affectedIndices: new Set(indices),
-      affectedSubModules: new Set(),
-      affectedFunctions: new Set(),
-    };
-    for (const idx of indices) {
-      const row = this.rows.find((r) => r.index === idx);
-      if (!row) continue;
-      if (row.module && row.sub_module) {
-        cs.affectedSubModules.add(makeSubModuleKey(row.module, row.sub_module));
-        if (row.function) {
-          cs.affectedFunctions.add(
-            makeFunctionKey(row.module, row.sub_module, row.function),
-          );
-        }
-      }
-    }
-    return cs;
-  }
-
-  /**
-   * For R4 pruning: get (module, sub_module) keys that are affected.
-   * Returns set of "module::sub_module" strings.
-   */
-  getAffectedSubModuleKeys(changes: RoundChangeSet): Set<string> {
-    return changes.affectedSubModules;
-  }
-
-  /**
-   * Get rows for a specific sub_module (module, sub_module pair)
-   * at level 4 (function + sub_function + description visible).
-   * Optionally pruned to only rows whose function is in the change set.
+   * For R4 pruning: return function-level rows (level 3) whose
+   * (module, sub_module, function) key is in the function filter.
    */
   getRowsForSubModule(
     module: string,
     subModule: string,
     prunedFunctionKeys?: Set<string>,
   ): LevelRow[] {
-    return this.rows
-      .filter((r) => {
-        if (r.module !== module || r.sub_module !== subModule) return false;
-        if (r.function == null) return false;
-        if (prunedFunctionKeys) {
-          return prunedFunctionKeys.has(
-            makeFunctionKey(module, subModule, r.function),
-          );
-        }
-        return true;
-      })
-      .map((r) => ({
-        index: r.index,
-        module: r.module!,
-        sub_module: r.sub_module,
-        function: r.function,
-        sub_function: r.sub_function,
-        description: r.description,
-      }));
+    const mod = this.root.find((m) => m.name === module);
+    if (!mod) return [];
+    const sub = mod.children.find((s) => s.name === subModule);
+    if (!sub) return [];
+
+    const rows: LevelRow[] = [];
+    for (const func of sub.children) {
+      if (prunedFunctionKeys && !prunedFunctionKeys.has(funcKey(module, subModule, func.name))) continue;
+      rows.push({ id: func.id, module, sub_module: subModule, function: func.name, sub_function: null, description: null });
+      // Also include existing leaf rows under this function
+      for (const leaf of func.children) {
+        rows.push({ id: leaf.id, module, sub_module: subModule, function: func.name, sub_function: leaf.name, description: leaf.description });
+      }
+    }
+    return rows;
+  }
+
+  groupBySubModule(rows: LevelRow[]): Map<string, { module: string; subModule: string; rows: LevelRow[] }> {
+    const map = new Map<string, { module: string; subModule: string; rows: LevelRow[] }>();
+    for (const r of rows) {
+      const key = subKey(r.module, r.sub_module!);
+      let entry = map.get(key);
+      if (!entry) {
+        entry = { module: r.module, subModule: r.sub_module!, rows: [] };
+        map.set(key, entry);
+      }
+      entry.rows.push(r);
+    }
+    return map;
   }
 
   // -----------------------------------------------------------------------
-  // Human-readable table formatter — for tool-call logging
+  // R1 CRUD
+  // -----------------------------------------------------------------------
+
+  addModules(names: string[]): number[] {
+    const ids: number[] = [];
+    for (const name of names) {
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      if (this.root.some((m) => m.name === trimmed)) continue;
+      const node: TreeNode = { id: this.nextId++, type: "module", name: trimmed, description: null, children: [] };
+      this.root.push(node);
+      this.idMap.set(node.id, node);
+      ids.push(node.id);
+    }
+    return ids;
+  }
+
+  deleteModules(names: string[]): void {
+    for (const name of names) {
+      const trimmed = name.trim();
+      const idx = this.root.findIndex((m) => m.name === trimmed);
+      if (idx === -1) continue;
+      this.removeNode(this.root[idx]);
+      this.root.splice(idx, 1);
+    }
+  }
+
+  renameModule(oldName: string, newName: string): void {
+    const mod = this.root.find((m) => m.name === oldName);
+    if (!mod) throw new Error(`Module "${oldName}" not found`);
+    mod.name = newName.trim();
+  }
+
+  // -----------------------------------------------------------------------
+  // R2 CRUD
+  // -----------------------------------------------------------------------
+
+  addSubModules(moduleName: string, names: string[]): number[] {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) throw new Error(`Module "${moduleName}" not found`);
+    const ids: number[] = [];
+    for (const name of names) {
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      if (mod.children.some((s) => s.name === trimmed)) continue;
+      const node: TreeNode = { id: this.nextId++, type: "sub_module", name: trimmed, description: null, children: [] };
+      mod.children.push(node);
+      this.idMap.set(node.id, node);
+      ids.push(node.id);
+    }
+    return ids;
+  }
+
+  deleteSubModules(moduleName: string, names: string[]): void {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) return;
+    for (const name of names) {
+      const trimmed = name.trim();
+      const idx = mod.children.findIndex((s) => s.name === trimmed);
+      if (idx === -1) continue;
+      this.removeNode(mod.children[idx]);
+      mod.children.splice(idx, 1);
+    }
+  }
+
+  renameSubModule(moduleName: string, oldName: string, newName: string): void {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) throw new Error(`Module "${moduleName}" not found`);
+    const sub = mod.children.find((s) => s.name === oldName);
+    if (!sub) throw new Error(`Sub-module "${oldName}" not found in module "${moduleName}"`);
+    sub.name = newName.trim();
+  }
+
+  // -----------------------------------------------------------------------
+  // R3 CRUD
+  // -----------------------------------------------------------------------
+
+  addFunctions(moduleName: string, subName: string, names: string[]): number[] {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) throw new Error(`Module "${moduleName}" not found`);
+    const sub = mod.children.find((s) => s.name === subName);
+    if (!sub) throw new Error(`Sub-module "${subName}" not found in module "${moduleName}"`);
+    const ids: number[] = [];
+    for (const name of names) {
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      if (sub.children.some((f) => f.name === trimmed)) continue;
+      const node: TreeNode = { id: this.nextId++, type: "function", name: trimmed, description: null, children: [] };
+      sub.children.push(node);
+      this.idMap.set(node.id, node);
+      ids.push(node.id);
+    }
+    return ids;
+  }
+
+  deleteFunctions(moduleName: string, subName: string, names: string[]): void {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) return;
+    const sub = mod.children.find((s) => s.name === subName);
+    if (!sub) return;
+    for (const name of names) {
+      const trimmed = name.trim();
+      const idx = sub.children.findIndex((f) => f.name === trimmed);
+      if (idx === -1) continue;
+      this.removeNode(sub.children[idx]);
+      sub.children.splice(idx, 1);
+    }
+  }
+
+  renameFunction(moduleName: string, subName: string, oldName: string, newName: string): void {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) throw new Error(`Module "${moduleName}" not found`);
+    const sub = mod.children.find((s) => s.name === subName);
+    if (!sub) throw new Error(`Sub-module "${subName}" not found`);
+    const func = sub.children.find((f) => f.name === oldName);
+    if (!func) throw new Error(`Function "${oldName}" not found`);
+    func.name = newName.trim();
+  }
+
+  // -----------------------------------------------------------------------
+  // R4 CRUD
+  // -----------------------------------------------------------------------
+
+  addLeaves(
+    moduleName: string, subName: string, funcName: string,
+    leaves: { sub_function: string; description: string }[],
+  ): number[] {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) throw new Error(`Module "${moduleName}" not found`);
+    const sub = mod.children.find((s) => s.name === subName);
+    if (!sub) throw new Error(`Sub-module "${subName}" not found`);
+    const func = sub.children.find((f) => f.name === funcName);
+    if (!func) throw new Error(`Function "${funcName}" not found`);
+    const ids: number[] = [];
+    for (const leaf of leaves) {
+      const tName = leaf.sub_function.trim();
+      const tDesc = leaf.description.trim();
+      if (!tName || !tDesc) continue;
+      if (func.children.some((l) => l.name === tName)) continue;
+      const node: TreeNode = { id: this.nextId++, type: "leaf", name: tName, description: tDesc, children: [] };
+      func.children.push(node);
+      this.idMap.set(node.id, node);
+      ids.push(node.id);
+    }
+    return ids;
+  }
+
+  deleteLeaves(moduleName: string, subName: string, funcName: string, names: string[]): void {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) return;
+    const sub = mod.children.find((s) => s.name === subName);
+    if (!sub) return;
+    const func = sub.children.find((f) => f.name === funcName);
+    if (!func) return;
+    for (const name of names) {
+      const trimmed = name.trim();
+      const idx = func.children.findIndex((l) => l.name === trimmed);
+      if (idx === -1) continue;
+      this.removeNode(func.children[idx]);
+      func.children.splice(idx, 1);
+    }
+  }
+
+  updateLeafDescription(moduleName: string, subName: string, funcName: string, leafName: string, newDesc: string): void {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) throw new Error(`Module "${moduleName}" not found`);
+    const sub = mod.children.find((s) => s.name === subName);
+    if (!sub) throw new Error(`Sub-module "${subName}" not found`);
+    const func = sub.children.find((f) => f.name === funcName);
+    if (!func) throw new Error(`Function "${funcName}" not found`);
+    const leaf = func.children.find((l) => l.name === leafName);
+    if (!leaf) throw new Error(`Leaf "${leafName}" not found under "${moduleName} → ${subName} → ${funcName}"`);
+    leaf.description = newDesc.trim();
+  }
+
+  renameSubFunction(moduleName: string, subName: string, funcName: string, oldName: string, newName: string): void {
+    const mod = this.root.find((m) => m.name === moduleName);
+    if (!mod) throw new Error(`Module "${moduleName}" not found`);
+    const sub = mod.children.find((s) => s.name === subName);
+    if (!sub) throw new Error(`Sub-module "${subName}" not found`);
+    const func = sub.children.find((f) => f.name === funcName);
+    if (!func) throw new Error(`Function "${funcName}" not found`);
+    const leaf = func.children.find((l) => l.name === oldName);
+    if (!leaf) throw new Error(`Leaf "${oldName}" not found`);
+    leaf.name = newName.trim();
+  }
+
+  // -----------------------------------------------------------------------
+  // Cascade remove
+  // -----------------------------------------------------------------------
+
+  private removeNode(node: TreeNode): void {
+    this.idMap.delete(node.id);
+    for (const child of node.children) {
+      this.removeNode(child);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Snapshots — for diff-based change tracking
+  // -----------------------------------------------------------------------
+
+  buildLevelSnapshot(level: number, filter?: { module: string; subModule: string }): Map<number, string> {
+    const snap = new Map<number, string>();
+
+    if (level === 1) {
+      for (const mod of this.root) snap.set(mod.id, mod.name);
+      return snap;
+    }
+
+    if (level === 2) {
+      for (const mod of this.root) {
+        for (const sub of mod.children) snap.set(sub.id, `${mod.name}::${sub.name}`);
+      }
+      return snap;
+    }
+
+    if (level === 3) {
+      for (const mod of this.root) {
+        for (const sub of mod.children) {
+          for (const func of sub.children) snap.set(func.id, `${mod.name}::${sub.name}::${func.name}`);
+        }
+      }
+      return snap;
+    }
+
+    // level 4 — optionally filtered to a sub_module
+    if (level === 4) {
+      const mods = filter
+        ? this.root.filter((m) => m.name === filter.module)
+        : this.root;
+      for (const mod of mods) {
+        const subs = filter
+          ? mod.children.filter((s) => s.name === filter.subModule)
+          : mod.children;
+        for (const sub of subs) {
+          for (const func of sub.children) {
+            for (const leaf of func.children) {
+              snap.set(leaf.id, `${mod.name}::${sub.name}::${func.name}::${leaf.name}||${leaf.description ?? ""}`);
+            }
+          }
+        }
+      }
+      return snap;
+    }
+
+    return snap;
+  }
+
+  static diffSnapshots(before: Map<number, string>, after: Map<number, string>): number[] {
+    const changed = new Set<number>();
+    for (const [id, val] of after) {
+      if (!before.has(id) || before.get(id) !== val) changed.add(id);
+    }
+    for (const id of before.keys()) {
+      if (!after.has(id)) changed.add(id);
+    }
+    return [...changed];
+  }
+
+  // -----------------------------------------------------------------------
+  // Change tracking
+  // -----------------------------------------------------------------------
+
+  buildChangeSet(changedIds: number[]): RoundChangeSet {
+    const cs: RoundChangeSet = { affectedIds: new Set(changedIds), affectedSubModules: new Set(), affectedFunctions: new Set() };
+
+    for (const id of changedIds) {
+      const node = this.idMap.get(id);
+      if (!node) continue;
+
+      // Walk up to resolve path
+      const path = this.resolvePath(id);
+      if (!path) continue;
+
+      if (path.sub) {
+        cs.affectedSubModules.add(subKey(path.mod, path.sub));
+      }
+      if (path.func) {
+        cs.affectedFunctions.add(funcKey(path.mod, path.sub!, path.func));
+      }
+    }
+
+    return cs;
+  }
+
+  private resolvePath(id: number): { mod: string; sub?: string; func?: string } | null {
+    // Try to find the node and walk up by searching parents
+    const node = this.idMap.get(id);
+    if (!node) return null;
+
+    // For module nodes
+    if (node.type === "module") return { mod: node.name };
+
+    // Search children of modules
+    for (const mod of this.root) {
+      for (const sub of mod.children) {
+        if (sub.id === id) return { mod: mod.name, sub: sub.name };
+        for (const func of sub.children) {
+          if (func.id === id) return { mod: mod.name, sub: sub.name, func: func.name };
+          for (const leaf of func.children) {
+            if (leaf.id === id) return { mod: mod.name, sub: sub.name, func: func.name };
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  getAffectedSubModuleKeys(changes: RoundChangeSet): Set<string> {
+    return changes.affectedSubModules;
+  }
+
+  // -----------------------------------------------------------------------
+  // Human-readable table formatter
   // -----------------------------------------------------------------------
 
   private static COL_WIDTHS: Record<string, number> = {
-    idx: 5,
+    id: 4,
     module: 18,
     sub_module: 16,
     function: 16,
@@ -614,12 +612,12 @@ export class DecomposerTable {
     description: 24,
   };
 
-  formatTableForLevel(level: number): string {
+  formatTreeForLevel(level: number): string {
     const rows = this.getRowsAtLevel(level);
     if (!rows.length) return "  (empty)";
 
     const cols = this.columnsForLevel(level);
-    const widths = this.computeColumnWidths(rows, cols, level);
+    const widths = this.computeColumnWidths(rows, cols);
 
     const sep = cols.map((c) => "─".repeat(widths[c])).join("─┼─");
     const header = cols.map((c) => c.padEnd(widths[c])).join(" │ ");
@@ -630,7 +628,7 @@ export class DecomposerTable {
     ];
 
     for (const r of rows) {
-      const vals = cols.map((c) => this.cellValue(r, c, level).padEnd(widths[c]));
+      const vals = cols.map((c) => this.cellValue(r, c).padEnd(widths[c]));
       lines.push(`  │ ${vals.join(" │ ")} │`);
     }
     lines.push(`  └─${sep}─┘`);
@@ -640,35 +638,30 @@ export class DecomposerTable {
 
   private columnsForLevel(level: number): string[] {
     switch (level) {
-      case 1: return ["idx", "module"];
-      case 2: return ["idx", "module", "sub_module"];
-      case 3: return ["idx", "module", "sub_module", "function"];
-      case 4: return ["idx", "module", "sub_module", "function", "sub_function", "description"];
-      default: return ["idx"];
+      case 1: return ["id", "module"];
+      case 2: return ["id", "module", "sub_module"];
+      case 3: return ["id", "module", "sub_module", "function"];
+      case 4: return ["id", "module", "sub_module", "function", "sub_function", "description"];
+      default: return ["id"];
     }
   }
 
-  private computeColumnWidths(
-    rows: LevelRow[],
-    cols: string[],
-    level: number,
-  ): Record<string, number> {
+  private computeColumnWidths(rows: LevelRow[], cols: string[]): Record<string, number> {
     const widths: Record<string, number> = {};
     for (const c of cols) {
       const headerLen = c.length;
       let maxData = 0;
       for (const r of rows) {
-        const v = this.cellValue(r, c, level);
-        maxData = Math.max(maxData, v.length);
+        maxData = Math.max(maxData, this.cellValue(r, c).length);
       }
-      widths[c] = Math.min(Math.max(headerLen, maxData), DecomposerTable.COL_WIDTHS[c] ?? 20);
+      widths[c] = Math.min(Math.max(headerLen, maxData), DecomposerTree.COL_WIDTHS[c] ?? 20);
     }
     return widths;
   }
 
-  private cellValue(row: LevelRow, col: string, _level: number): string {
+  private cellValue(row: LevelRow, col: string): string {
     switch (col) {
-      case "idx": return String(row.index);
+      case "id": return String(row.id);
       case "module": return row.module;
       case "sub_module": return row.sub_module ?? "";
       case "function": return row.function ?? "";

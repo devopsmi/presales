@@ -20,7 +20,7 @@ const PREVIEW_LEN = 100000;
 // Content extraction helpers
 // ---------------------------------------------------------------------------
 
-type ContentBlock = { type: string; text?: string; reasoning?: string;[k: string]: unknown };
+type ContentBlock = { type: string; text?: string; reasoning?: string; thinking?: string; [k: string]: unknown };
 
 export function extractStringContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -107,6 +107,64 @@ function dur(ms: number): string {
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
+
+/**
+ * Preserve deepseek thinking blocks across multi-turn agent calls.
+ *
+ * DeepSeek in thinking mode returns content arrays like:
+ *   [{"type":"thinking","thinking":"..."}, {"type":"text","text":"..."}]
+ * ChatOpenAI may drop unknown block types when re-serializing for the next
+ * request. This middleware captures them from the response and restores them
+ * in subsequent requests so DeepSeek doesn't reject with 400.
+ */
+const THINKING_KEY = Symbol.for("deepseek_thinking");
+
+function extractThinkingBlocks(content: unknown): ContentBlock[] | null {
+  if (!Array.isArray(content)) return null;
+  const thinking = content.filter((b: any) => b.type === "thinking" && b.thinking);
+  return thinking.length > 0 ? thinking : null;
+}
+
+function restoreThinkingBlocks(msg: Record<string, unknown>): void {
+  const blocks = (msg as any)[THINKING_KEY] as ContentBlock[] | undefined;
+  if (!blocks?.length) return;
+
+  const content = msg.content;
+  if (typeof content === "string") {
+    msg.content = [...blocks, { type: "text", text: content }];
+  } else if (Array.isArray(content)) {
+    const hasThinking = (content as ContentBlock[]).some((b: any) => b.type === "thinking");
+    if (!hasThinking) {
+      msg.content = [...blocks, ...(content as ContentBlock[])];
+    }
+  }
+}
+
+export function createDeepseekThinkingMiddleware() {
+  return createMiddleware({
+    name: "DeepseekThinkingRepair",
+    wrapModelCall: async (request: any, handler: any) => {
+      // PRE: restore thinking blocks from previous turns
+      if (request.messages) {
+        for (const msg of request.messages) {
+          if (typeof msg._getType === "function" && msg._getType() !== "ai") continue;
+          restoreThinkingBlocks(msg);
+        }
+      }
+
+      const response = await handler(request);
+
+      // POST: capture thinking blocks from this turn's response
+      const content = response.content;
+      const thinking = extractThinkingBlocks(content);
+      if (thinking) {
+        (response as any)[THINKING_KEY] = thinking;
+      }
+
+      return response;
+    },
+  });
+}
 
 export function createModelLoggingMiddleware(agentName: string) {
   return createMiddleware({

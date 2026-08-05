@@ -1,9 +1,9 @@
 import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { DecomposerTable } from "./table";
+import { DecomposerTree } from "./table";
 import type { LevelRow } from "./table";
-import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
+import { createModelLoggingMiddleware, createDeepseekThinkingMiddleware, extractStringContent } from "@/lib/agent/llm";
 import {
   buildR1Tools,
   buildR2Tools,
@@ -136,7 +136,7 @@ function buildR2UserPrompt(
 
   parts.push(
     "## 任务\n请根据项目简报和已有模块，为每个模块拆解子模块。" +
-    "使用 add_sub_modules 逐模块添加。支撑辅助域（如设计文档）不拆分。" +
+    "使用 add_sub_modules 逐模块添加。纯文档/设计的辅助域（非开发交付范畴）不拆分，含接口定义/API文档等开发产出的为开发模块需拆分。" +
     "完成后调用 read_sub_modules 确认。",
   );
   return parts.join("\n");
@@ -238,19 +238,19 @@ function buildR4UserPrompt(
 // ---------------------------------------------------------------------------
 
 export interface RoundResult {
-  changedIndices: number[];
+  changedIds: number[];
   rowCount: number;
 }
 
 export async function runR1Agent(
   model: BaseChatModel,
-  table: DecomposerTable,
+  table: DecomposerTree,
   brief: string,
   systemPrompt: string,
   instruction?: string,
 ): Promise<RoundResult> {
   const beforeSnap = table.buildLevelSnapshot(1);
-  const userPrompt = buildR1UserPrompt(table.getModules(), { brief, instruction });
+  const userPrompt = buildR1UserPrompt(table.getModuleNames(), { brief, instruction });
 
   logger.info("decomposer_r1 start", {
     sys: firstLine(systemPrompt),
@@ -262,6 +262,7 @@ export async function runR1Agent(
     systemPrompt,
     tools: buildR1Tools(table),
     middleware: [
+      createDeepseekThinkingMiddleware(),
       createModelLoggingMiddleware("decomposer_r1"),
       createDecomposerToolMiddleware("decomposer_r1", table, 1, logger),
     ],
@@ -280,20 +281,20 @@ export async function runR1Agent(
   });
 
   const afterSnap = table.buildLevelSnapshot(1);
-  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
+  const changedIds = DecomposerTree.diffSnapshots(beforeSnap, afterSnap);
 
-  return { changedIndices, rowCount: afterSnap.size };
+  return { changedIds, rowCount: afterSnap.size };
 }
 
 export async function runR2Agent(
   model: BaseChatModel,
-  table: DecomposerTable,
+  table: DecomposerTree,
   brief: string,
   systemPrompt: string,
   instruction?: string,
 ): Promise<RoundResult> {
   const beforeSnap = table.buildLevelSnapshot(2);
-  const userPrompt = buildR2UserPrompt(table.getModules(), table.getSubModules(), {
+  const userPrompt = buildR2UserPrompt(table.getModuleNames(), table.getSubModulePairs(), {
     brief,
     instruction,
   });
@@ -308,6 +309,7 @@ export async function runR2Agent(
     systemPrompt,
     tools: buildR2Tools(table),
     middleware: [
+      createDeepseekThinkingMiddleware(),
       createModelLoggingMiddleware("decomposer_r2"),
       createDecomposerToolMiddleware("decomposer_r2", table, 2, logger),
     ],
@@ -326,14 +328,14 @@ export async function runR2Agent(
   });
 
   const afterSnap = table.buildLevelSnapshot(2);
-  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
+  const changedIds = DecomposerTree.diffSnapshots(beforeSnap, afterSnap);
 
-  return { changedIndices, rowCount: afterSnap.size };
+  return { changedIds, rowCount: afterSnap.size };
 }
 
 export async function runR3Agent(
   model: BaseChatModel,
-  table: DecomposerTable,
+  table: DecomposerTree,
   brief: string,
   contextRows: LevelRow[],
   systemPrompt: string,
@@ -352,6 +354,7 @@ export async function runR3Agent(
     systemPrompt,
     tools: buildR3Tools(table),
     middleware: [
+      createDeepseekThinkingMiddleware(),
       createModelLoggingMiddleware("decomposer_r3"),
       createDecomposerToolMiddleware("decomposer_r3", table, 3, logger),
     ],
@@ -370,30 +373,38 @@ export async function runR3Agent(
   });
 
   const afterSnap = table.buildLevelSnapshot(3);
-  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
+  const changedIds = DecomposerTree.diffSnapshots(beforeSnap, afterSnap);
 
-  return { changedIndices, rowCount: afterSnap.size };
+  return { changedIds, rowCount: afterSnap.size };
 }
 
 export async function runR4AgentForSubModule(
   model: BaseChatModel,
-  table: DecomposerTable,
+  table: DecomposerTree,
   module: string,
   subModule: string,
   rows: LevelRow[],
   brief: string,
   systemPrompt: string,
-  instruction?: string,
+  instruction: string | undefined,
+  agentIndex: number,
+  totalAgents: number,
 ): Promise<RoundResult> {
+  const agentPrefix = `R4 #${agentIndex}/${totalAgents}`;
+  const agentLabel = `${agentPrefix} ${module}→${subModule}`;
+  const agentLogger = logger.child({
+    agent: `r4_${agentIndex}/${totalAgents}`,
+    module,
+    subModule,
+  });
+
   const beforeSnap = table.buildLevelSnapshot(4, { module, subModule });
   const userPrompt = buildR4UserPrompt(rows, module, subModule, {
     brief,
     instruction,
   });
 
-  logger.info("decomposer_r4 start", {
-    module,
-    subModule,
+  agentLogger.info(`${agentLabel} start`, {
     sys: firstLine(systemPrompt),
     prompt: firstLine(userPrompt),
   });
@@ -403,27 +414,31 @@ export async function runR4AgentForSubModule(
     systemPrompt,
     tools: buildR4Tools(table),
     middleware: [
-      createModelLoggingMiddleware("decomposer_r4"),
-      createDecomposerToolMiddleware("decomposer_r4", table, 4, logger),
+      createDeepseekThinkingMiddleware(),
+      createModelLoggingMiddleware(`r4[${agentIndex}/${totalAgents}]`),
+      createDecomposerToolMiddleware(`${agentPrefix} ${module}→${subModule}`, table, 4, agentLogger),
     ],
   });
 
+  const t0 = Date.now();
   const result = await invokeWithRetry(
-    "decomposer_r4",
+    `decomposer_r4_${agentIndex}`,
     agent,
     userPrompt,
     20,
   );
+  const elapsed = Date.now() - t0;
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
-  logger.info("decomposer_r4 complete", {
-    module,
-    subModule,
+
+  const afterSnap = table.buildLevelSnapshot(4, { module, subModule });
+  const changedIds = DecomposerTree.diffSnapshots(beforeSnap, afterSnap);
+
+  agentLogger.info(`${agentLabel} complete (${elapsed}ms)`, {
+    rowCount: afterSnap.size,
+    changedIds: changedIds.length,
     out: firstLine(output ?? ""),
   });
 
-  const afterSnap = table.buildLevelSnapshot(4, { module, subModule });
-  const changedIndices = DecomposerTable.diffSnapshots(beforeSnap, afterSnap);
-
-  return { changedIndices, rowCount: afterSnap.size };
+  return { changedIds, rowCount: afterSnap.size };
 }

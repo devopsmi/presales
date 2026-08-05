@@ -121,7 +121,7 @@ function buildUserPrompt(structuredBrief: string, totalRows: number): string {
     "### 建议阅读策略",
     `1. 先调用 \`read_rows({})\` (不传参) 获取全部行的层级概览（不含功能描述），了解清单的结构和规模`,
     `2. 按模块名逐批深度检查：\`read_rows({ module: "XX" })\` 读取一个模块的所有行（含完整描述）`,
-    `3. 如有疑似重复或遗漏，用 \`read_rows({ seqs: [3, 8, 15] })\` 精确定位对比`,
+    `3. 如有疑似重复或遗漏，用 \`read_rows({ module: "XX", sub_module: "YY" })\` 缩小范围精确定位对比`,
     `4. 确认遗漏时，想好在需求的哪个位置新增，在 issue 的 location 中描述`,
     "",
     "请逐一核对报价表的每个功能项是否与原始需求简报一致。评估完成后，在最终回复中输出完整的评估结果 JSON 对象。",

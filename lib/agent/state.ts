@@ -61,7 +61,7 @@ export interface EstimatorOutput {
 
 export interface EvaluatorIssue {
   severity: "error" | "warning";
-  /** 可被 read_rows 定位的路径，如 "seq-5 模块'C端'→子模块'订单'→功能'退款'"。遗漏项无 seq 前缀。 */
+  /** 模块层级路径，如 "模块'C端'→子模块'订单'→功能'退款'"。遗漏项无 seq 前缀，用【缺失】标记。 */
   location: string;
   description: string;
 }

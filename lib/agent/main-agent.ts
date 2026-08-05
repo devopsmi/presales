@@ -598,12 +598,12 @@ function buildGrillMeTool(model: BaseChatModel) {
 }
 
 // ---------------------------------------------------------------------------
-// Row reading tool — inspect rows by seq, module, or sub_module
+// Row reading tool — inspect rows by module or sub_module
 // ---------------------------------------------------------------------------
 
 function buildReadRowsTool() {
   return tool(
-    async ({ seqs, module, sub_module }: { seqs?: number[]; module?: string; sub_module?: string }, config?: RunnableConfig) => {
+    async ({ module, sub_module }: { module?: string; sub_module?: string }, config?: RunnableConfig) => {
       const sessionId = getSessionId(config);
       const cache = getOrCreateSessionCache(sessionId);
 
@@ -613,10 +613,6 @@ function buildReadRowsTool() {
 
       let filtered = cache.rows;
 
-      if (seqs && seqs.length > 0) {
-        const seqSet = new Set(seqs);
-        filtered = filtered.filter(r => seqSet.has(r.seq));
-      }
       if (module) {
         filtered = filtered.filter(r => r.module === module);
       }
@@ -624,10 +620,12 @@ function buildReadRowsTool() {
         filtered = filtered.filter(r => r.sub_module === sub_module);
       }
 
-      const isOverview = !(seqs && seqs.length > 0) && !module && !sub_module;
+      const isOverview = !module && !sub_module;
 
       const lines = filtered.map(r => {
-        const prefix = `seq-${r.seq} | ${r.category === "design" ? "[设计]" : "[功能]"} ${r.module} → ${r.sub_module} → ${r.function} → ${r.sub_function}`;
+        const prefix = `[${r.category === "design" ? "设计" : "功能"}] ${r.module}` +
+          ` → ${r.sub_module} → ${r.function}` +
+          (r.sub_function ? ` → ${r.sub_function}` : "");
         if (isOverview) return prefix;
         return prefix + `: ${r.description}` + (r.remark ? ` (备注: ${r.remark})` : "");
       });
@@ -637,14 +635,13 @@ function buildReadRowsTool() {
         matched: filtered.length,
         totalRows: cache.rows.length,
         rows: lines,
-        ...(isOverview && { note: "概览模式已省略功能描述，按模块名/子模块名/seq 筛选后会显示完整信息。" }),
+        ...(isOverview && { note: "概览模式已省略功能描述，按模块名/子模块名筛选后会显示完整信息。" }),
       });
     },
     {
       name: "read_rows",
-      description: "按条件读取功能清单中的指定行。可通过 seq 号列表、模块名、子模块名任意组合筛选。用于查看特定行的当前内容，或在调用 decompose 修改前确认要修改的行。",
+      description: "按条件读取功能清单中的指定行。可通过模块名(module)、子模块名(sub_module)组合筛选。用于查看特定行的当前内容，或在调用 decompose 修改前确认要修改的行。",
       schema: z.object({
-        seqs: z.array(z.number()).optional().describe("要读取的行序号（seq号）列表，如 [3, 5, 12]"),
         module: z.string().optional().describe("按模块名筛选，如 'C端微信小程序'"),
         sub_module: z.string().optional().describe("按子模块名筛选，如 '订单管理'。可配合 module 参数精确过滤同名子模块"),
       }),
