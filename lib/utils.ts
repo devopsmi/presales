@@ -5,6 +5,31 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+export async function concurrentLimit<T>(
+  limit: number,
+  tasks: Array<(() => Promise<T>) | Promise<T>>,
+): Promise<T[]> {
+  const results: T[] = [];
+  const executing = new Set<Promise<void>>();
+
+  for (const task of tasks) {
+    const p = (typeof task === "function" ? task() : task).then((r) => {
+      results.push(r);
+    });
+    executing.add(p);
+
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+    for (const e of executing) {
+      e.then(() => executing.delete(e), () => executing.delete(e));
+    }
+  }
+
+  await Promise.all(executing);
+  return results;
+}
+
 /**
  * Generate a UUID v4 using crypto.getRandomValues().
  * Unlike crypto.randomUUID(), this works in non-secure (HTTP) contexts.

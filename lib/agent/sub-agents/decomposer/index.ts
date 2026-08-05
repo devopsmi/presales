@@ -249,35 +249,50 @@ export async function runDecomposer(
           r4Tasks.push({ index: r4Tasks.length + 1, module, subModule, rows });
         }
 
-        // Fire parallel R4 calls
+        const R4_CONCURRENCY = 6;
         const totalR4 = r4Tasks.length;
-        const r4Promises = r4Tasks.map(async ({ index, module, subModule, rows }) => {
-          const taskInstruction = hasInstruction ? instruction : undefined;
-          try {
-            const r4Result = await runR4AgentForSubModule(
-              model,
-              table,
-              module,
-              subModule,
-              rows,
-              brief,
-              systemPrompt,
-              taskInstruction,
-              index,
-              totalR4,
-            );
-            return { module, subModule, ...r4Result };
-          } catch (err) {
-            const enriched = new Error(
-              `R4[${module}→${subModule}]: ${err instanceof Error ? err.message : String(err)}`,
-            );
-            (enriched as any).module = module;
-            (enriched as any).subModule = subModule;
-            throw enriched;
-          }
-        });
+        const r4TaskFactories = r4Tasks.map(
+          ({ index, module, subModule, rows }) =>
+            async () => {
+              const taskInstruction = hasInstruction ? instruction : undefined;
+              try {
+                const r4Result = await runR4AgentForSubModule(
+                  model,
+                  table,
+                  module,
+                  subModule,
+                  rows,
+                  brief,
+                  systemPrompt,
+                  taskInstruction,
+                  index,
+                  totalR4,
+                );
+                return { module, subModule, ...r4Result };
+              } catch (err) {
+                const enriched = new Error(
+                  `R4[${module}→${subModule}]: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                (enriched as any).module = module;
+                (enriched as any).subModule = subModule;
+                throw enriched;
+              }
+            },
+        );
 
-        const r4Settled = await Promise.allSettled(r4Promises);
+        const r4Settled: PromiseSettledResult<Awaited<ReturnType<(typeof r4TaskFactories)[number]>>>[] = [];
+        {
+          const running = new Set<Promise<void>>();
+          for (const factory of r4TaskFactories) {
+            const p = factory()
+              .then((value) => { r4Settled.push({ status: "fulfilled", value }); })
+              .catch((reason) => { r4Settled.push({ status: "rejected", reason }); });
+            running.add(p);
+            if (running.size >= R4_CONCURRENCY) await Promise.race(running);
+            for (const r of running) { r.then(() => running.delete(r), () => running.delete(r)); }
+          }
+          await Promise.all(running);
+        }
 
         const r4AllResults: Array<{
           module: string;

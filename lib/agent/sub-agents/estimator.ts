@@ -14,6 +14,7 @@ import type { EstimatorOutput } from "@/lib/agent/state";
 import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
 import { getSessionConfig } from "@/lib/session-config";
 import log from "@/lib/logger";
+import { concurrentLimit } from "@/lib/utils";
 
 const logger = log.child({ agent: "estimator" });
 
@@ -285,9 +286,10 @@ export async function runEstimator(
     chunkIndex: i + 1,
   }));
 
-  // Fire parallel estimation calls — one per sub_module
-  const chunkResults = await Promise.all(
-    chunks.map((chunk) => invokeEstimateChunk(model, systemPrompt, chunk)),
+  const ESTIMATOR_CONCURRENCY = 10;
+  const chunkResults = await concurrentLimit(
+    ESTIMATOR_CONCURRENCY,
+    chunks.map((chunk) => () => invokeEstimateChunk(model, systemPrompt, chunk)),
   );
 
   // Merge all chunk results into single seq→trades map

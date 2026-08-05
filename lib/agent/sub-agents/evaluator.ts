@@ -124,7 +124,13 @@ function buildUserPrompt(structuredBrief: string, totalRows: number): string {
     `3. 如有疑似重复或遗漏，用 \`read_rows({ module: "XX", sub_module: "YY" })\` 缩小范围精确定位对比`,
     `4. 确认遗漏时，想好在需求的哪个位置新增，在 issue 的 location 中描述`,
     "",
-    "请逐一核对报价表的每个功能项是否与原始需求简报一致。评估完成后，在最终回复中输出完整的评估结果 JSON 对象。",
+    "",
+    "## ⚠️ 最终输出格式（必须严格遵守）",
+    "你的最后一条回复必须是纯 JSON 对象，以 `{` 开头、以 `}` 结尾。",
+    "- 不要在 JSON 前面加任何解释文字（禁止「评估完成」「结果如下」等）",
+    "- 不要在 JSON 后面加任何文字",
+    "- 不要用 markdown 代码块（```json）包裹",
+    "直接输出 JSON，没有任何前缀或后缀。",
   ].join("\n");
 }
 
@@ -170,16 +176,38 @@ export async function runEvaluator(
     middleware: [createModelLoggingMiddleware("evaluator")],
   });
 
-  const result = await agent.invoke({
-    messages: [new HumanMessage(userPrompt)],
-  });
+  // Retry loop: LLM may produce malformed JSON on first attempt (e.g. adding
+  // commentary before/after the JSON object).  Retry once with a corrective prompt.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const prompt = attempt === 0
+      ? userPrompt
+      : userPrompt + "\n\n⚠️ 上一次输出的 JSON 解析失败。请确保你的最后一条回复只包含一个纯 JSON 对象：以 `{` 开头、以 `}` 结尾，中间不包含任何其他文字。不要加前言、后记或 markdown 代码块标记。";
 
-  const evalResult = extractEvaluationFromMessages(result.messages);
+    const result = await agent.invoke({
+      messages: [new HumanMessage(prompt)],
+    });
 
-  logger.info("evaluator complete", {
-    passed: evalResult.parsed.passed,
-    issueCount: evalResult.parsed.issues.length,
-  });
+    try {
+      const evalResult = extractEvaluationFromMessages(result.messages);
 
-  return evalResult.parsed;
+      logger.info("evaluator complete", {
+        passed: evalResult.parsed.passed,
+        issueCount: evalResult.parsed.issues.length,
+        attempt,
+      });
+
+      return evalResult.parsed;
+    } catch (err) {
+      if (attempt === 0) {
+        logger.warn("evaluator JSON parse failed, retrying", {
+          error: String(err),
+        });
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  // Unreachable — loop always returns or throws
+  throw new Error("Evaluator: unreachable");
 }

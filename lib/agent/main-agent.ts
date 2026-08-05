@@ -69,6 +69,7 @@ function getSessionId(config?: RunnableConfig): string {
 // ---------------------------------------------------------------------------
 
 const SESSION_CACHE_MAX = 100;
+const AGENT_CACHE_MAX = 20;
 const sessionCaches = new Map<string, PipelineCache>();
 
 function getOrCreateSessionCache(sessionId: string): PipelineCache {
@@ -77,6 +78,9 @@ function getOrCreateSessionCache(sessionId: string): PipelineCache {
     if (sessionCaches.size >= SESSION_CACHE_MAX) {
       const oldest = sessionCaches.keys().next().value!;
       sessionCaches.delete(oldest);
+      sharedCheckpointer.deleteThread(oldest).catch((err) => {
+        logger.warn("failed to clean checkpoint for evicted session", { sessionId: oldest, error: String(err) });
+      });
     }
     cache = createCache();
     sessionCaches.set(sessionId, cache);
@@ -129,7 +133,11 @@ export function getFileStatusMessage(sessionId: string): string | null {
 }
 
 export function clearSessionCache(sessionId: string): boolean {
-  return sessionCaches.delete(sessionId);
+  const deleted = sessionCaches.delete(sessionId);
+  sharedCheckpointer.deleteThread(sessionId).catch((err) => {
+    logger.warn("failed to clean checkpoint on reset", { sessionId, error: String(err) });
+  });
+  return deleted;
 }
 
 export function getDecomposerProgress(sessionId: string): DecomposerProgress | null {
@@ -696,6 +704,10 @@ export function createPresalesAgent(input: CreateMainAgentInput) {
   const cacheKey = `${modelKey}__${hashPrompt(effectivePrompt)}`;
 
   if (!agentCache.has(cacheKey)) {
+    if (agentCache.size >= AGENT_CACHE_MAX) {
+      const oldest = agentCache.keys().next().value!;
+      agentCache.delete(oldest);
+    }
     agentCache.set(cacheKey, buildAgent(input.model, effectivePrompt));
     logger.info("agent created and cached", { modelKey, promptHash: hashPrompt(effectivePrompt) });
   }

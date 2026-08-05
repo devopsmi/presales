@@ -140,10 +140,20 @@ export async function POST(req: Request) {
     });
 
     const encoder = new TextEncoder();
+    const abort = new AbortController();
+    req.signal.addEventListener("abort", () => abort.abort(), { once: true });
+
     const stream = new ReadableStream({
       async start(controller) {
-        const send = (msg: SseMessage) =>
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(msg)}\n\n`));
+        let aborted = false;
+        const send = (msg: SseMessage) => {
+          if (aborted) return;
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(msg)}\n\n`));
+          } catch {
+            aborted = true;
+          }
+        };
 
         try {
           const sid = sessionId || "default";
@@ -155,7 +165,7 @@ export async function POST(req: Request) {
 
           const run = await agent.streamEvents(
             { messages: agentMessages },
-            { version: "v3", configurable: { thread_id: sid } },
+            { version: "v3", configurable: { thread_id: sid }, signal: abort.signal },
           );
 
           // Synchronization flag: set to true when a tool event is sent, so the
@@ -262,16 +272,18 @@ export async function POST(req: Request) {
           send({ type: "finish", finishReason: "stop" });
           controller.close();
         } catch (err) {
-          log.error("agent failed", {
-            error: err instanceof Error ? err : new Error(String(err)),
-          });
-          send({
-            type: "error",
-            error: err instanceof Error ? err.message : "Agent error",
-          });
-          send({ type: "finish", finishReason: "error" });
-          controller.close();
+          if (!aborted) {
+            log.error("agent failed", {
+              error: err instanceof Error ? err : new Error(String(err)),
+            });
+            send({ type: "error", error: err instanceof Error ? err.message : "Agent error" });
+            send({ type: "finish", finishReason: "error" });
+            controller.close();
+          }
         }
+      },
+      cancel() {
+        abort.abort();
       },
     });
 

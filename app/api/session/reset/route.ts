@@ -1,4 +1,5 @@
 import { clearSessionCache } from "@/lib/agent/main-agent";
+import { deleteSessionConfig } from "@/lib/session-config";
 
 export const runtime = "nodejs";
 
@@ -13,6 +14,7 @@ export async function POST(req: Request) {
       });
     }
     clearSessionCache(sessionId);
+    deleteSessionConfig(sessionId);
     return new Response(JSON.stringify({ ok: true }), {
       headers: { "Content-Type": "application/json" },
     });

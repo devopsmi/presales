@@ -44,6 +44,7 @@ const DEFAULT_CONFIG: SessionConfig = {
   promptOverrides: {},
 };
 
+const MAX_SESSION_CONFIGS = 100;
 const store = new Map<string, SessionConfig>();
 
 export function getSessionConfig(sessionId: string): SessionConfig {
@@ -65,6 +66,14 @@ export function updateSessionConfig(
       quotedRates: patch.quotedRates ?? current.quotedRates,
       promptOverrides: patch.promptOverrides ?? current.promptOverrides,
     };
+  if (store.size >= MAX_SESSION_CONFIGS && !store.has(sessionId)) {
+    const oldest = store.keys().next().value!;
+    store.delete(oldest);
+  }
   store.set(sessionId, updated);
   return updated;
+}
+
+export function deleteSessionConfig(sessionId: string): boolean {
+  return store.delete(sessionId);
 }
