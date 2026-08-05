@@ -221,7 +221,7 @@ function buildR4UserPrompt(
   parts.push(`## 当前状态\n${stateLines.join("\n")}\n`);
 
   if (ctx.instruction) {
-    parts.push(`## 修改指令\n${ctx.instruction}\n`);
+    parts.push(`## 修改指令（仅应用于 ${module} → ${subModule}，不操作其他模块/子模块）\n${ctx.instruction}\n`);
   }
 
   parts.push(

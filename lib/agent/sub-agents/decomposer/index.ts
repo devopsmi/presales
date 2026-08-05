@@ -29,6 +29,8 @@ import {
   runR4AgentForSubModule,
   type RoundResult,
 } from "./agents";
+import { HumanMessage } from "@langchain/core/messages";
+import { extractStringContent } from "@/lib/agent/llm";
 import log from "@/lib/logger";
 
 const logger = log.child({ agent: "decomposer" });
@@ -53,6 +55,93 @@ function determineStartRound(
 function resolveAgentPrompt(level: 1 | 2 | 3 | 4, sessionId: string): string {
   const overrides = getSessionConfig(sessionId)?.promptOverrides;
   return resolvePrompt(`decomposer_r${level}_agent`, overrides);
+}
+
+// ---------------------------------------------------------------------------
+// R4 instruction → sub_module target resolution (lightweight LLM call)
+// ---------------------------------------------------------------------------
+
+interface SubModuleRef {
+  module: string;
+  subModule: string;
+}
+
+const R4TargetSchema = `{"scope":"specific"|"all","targets":["模块::子模块",...]}`;
+
+async function resolveR4InstructionTargets(
+  model: BaseChatModel,
+  instruction: string,
+  allSubModules: SubModuleRef[],
+  parentAffectedKeys: Set<string>,
+): Promise<Set<string> | null> {
+  // null = broad instruction, applies to ALL sub_modules
+  const keyList = allSubModules
+    .map(({ module, subModule }) => `${module}::${subModule}`)
+    .join("\n");
+
+  const prompt = [
+    "# 任务",
+    "判断以下修改指令需要应用于哪些子模块（module::sub_module格式）。",
+    "",
+    "## 修改指令",
+    instruction,
+    "",
+    "## 所有可用的子模块",
+    keyList,
+    "",
+    "## 父轮变更已影响的子模块",
+    [...parentAffectedKeys].join("\n") || "(无)",
+    "",
+    "## 输出规则",
+    `返回纯JSON（不含markdown代码块），格式: ${R4TargetSchema}`,
+    '- 若指令提到"全部"、"所有"、"每个"、"统一"等全局词 → {"scope":"all"}',
+    "- 若指令指向特定子模块 → {\"scope\":\"specific\",\"targets\":[\"模块::子模块\",...]}",
+    "- 父轮变更已影响的子模块如果指令也涉及，也需要加入targets",
+    "- targets中的key必须与上面列表中完全一致",
+  ].join("\n");
+
+  logger.info("R4 resolving instruction targets via LLM", {
+    instruction: firstLine(instruction),
+    subModuleCount: allSubModules.length,
+    parentAffectedCount: parentAffectedKeys.size,
+  });
+
+  try {
+    const response = await model.invoke([
+      new HumanMessage(prompt),
+    ]);
+    const text = extractStringContent(response.content) || JSON.stringify(response.content);
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      logger.warn("R4 target resolution: no JSON found in LLM response, falling back to all");
+      return null;
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (parsed.scope === "all") {
+      logger.info("R4 target resolution: broad instruction → all sub_modules");
+      return null;
+    }
+
+    if (parsed.scope === "specific" && Array.isArray(parsed.targets) && parsed.targets.length > 0) {
+      const stringTargets: string[] = (parsed.targets as unknown[]).filter((t): t is string => typeof t === "string");
+      const targets = new Set(stringTargets);
+      logger.info("R4 target resolution: specific targets", {
+        count: targets.size,
+        targets: [...targets].join(", "),
+      });
+      return targets;
+    }
+
+    logger.warn("R4 target resolution: unexpected response shape, falling back to all", { parsed });
+    return null;
+  } catch (err) {
+    logger.warn("R4 target resolution failed, falling back to all", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,61 +289,80 @@ export async function runDecomposer(
           message: "正在生成子功能详情...",
         });
 
-        // Determine which sub_modules need R4 agents
-        // Full context: all function-level rows grouped by sub_module
-        // Pruned context: only sub_modules affected by R3 changes, and only affected functions
         const parentChanges = roundChanges[round - 1];
-
-        // All R3-level rows grouped by sub_module
         const allR3Rows = table.getRowsAtLevel(3);
         const allSubModuleGroups = table.groupBySubModule(allR3Rows);
 
-        // Affected sub_module keys (for Agent-level pruning)
-        let affectedSubModuleKeys: Set<string> | undefined;
-        // Affected function keys (for Row-level pruning within agents without R4 instruction)
-        let affectedFunctionKeys: Set<string> | undefined;
-        if (parentChanges && !hasInstruction) {
-          affectedSubModuleKeys = table.getAffectedSubModuleKeys(parentChanges);
-          affectedFunctionKeys = parentChanges.affectedFunctions;
+        // Always collect parent-change affected keys (regardless of hasInstruction)
+        const parentAffectedKeys = parentChanges
+          ? table.getAffectedSubModuleKeys(parentChanges)
+          : new Set<string>();
+        const parentAffectedFunctionKeys = parentChanges?.affectedFunctions;
+
+        // When R4 has instruction, use LLM to determine which sub_modules the
+        // instruction targets. null = broad instruction (apply to all).
+        let instructionTargetedKeys: Set<string> | null | undefined;
+        if (hasInstruction) {
+          const allSubModuleRefs: SubModuleRef[] = [];
+          for (const [, { module, subModule }] of allSubModuleGroups) {
+            allSubModuleRefs.push({ module, subModule });
+          }
+          instructionTargetedKeys = await resolveR4InstructionTargets(
+            model, instruction!, allSubModuleRefs, parentAffectedKeys,
+          );
+
+          // Safety net: LLM returned empty targets + no parent changes → fallback to all
+          if (instructionTargetedKeys != null &&
+              instructionTargetedKeys.size === 0 &&
+              parentAffectedKeys.size === 0) {
+            logger.warn("R4 instruction matched no sub_modules and no parent changes — falling back to all");
+            instructionTargetedKeys = null;
+          }
         }
 
-        // Build R4 tasks: one per sub_module invocation
+        // Build R4 tasks
         const r4Tasks: Array<{
           index: number;
           module: string;
           subModule: string;
           rows: LevelRow[];
+          instructionTargeted: boolean;
         }> = [];
 
         for (const [, { module, subModule }] of allSubModuleGroups) {
-          // Agent-level pruning: skip sub_modules not affected by parent changes
-          if (affectedSubModuleKeys && !affectedSubModuleKeys.has(`${module}::${subModule}`)) {
-            continue;
+          const key = `${module}::${subModule}`;
+
+          // Determine if this sub_module should run an R4 agent
+          if (instructionTargetedKeys != null) {
+            if (!parentAffectedKeys.has(key) && !instructionTargetedKeys.has(key)) continue;
+          } else if (hasInstruction && instructionTargetedKeys === null) {
+          } else if (!hasInstruction && parentAffectedKeys.size > 0) {
+            if (!parentAffectedKeys.has(key)) continue;
           }
 
+          // Determine row context
           let rows: LevelRow[];
-          if (hasInstruction) {
-            // Full context for this sub_module
+          const isInstructionTargeted = instructionTargetedKeys?.has(key) ?? false;
+          const isParentAffected = parentAffectedKeys.has(key);
+
+          if (isInstructionTargeted) {
             rows = table.getRowsForSubModule(module, subModule);
-          } else if (affectedFunctionKeys) {
-            // Pruned: only affected function rows
-            rows = table.getRowsForSubModule(module, subModule, affectedFunctionKeys);
+          } else if (isParentAffected && parentAffectedFunctionKeys?.size) {
+            rows = table.getRowsForSubModule(module, subModule, parentAffectedFunctionKeys);
           } else {
-            // Full context (full decomposition, no pruning needed)
             rows = table.getRowsForSubModule(module, subModule);
           }
 
           if (rows.length === 0) continue;
-
-          r4Tasks.push({ index: r4Tasks.length + 1, module, subModule, rows });
+          r4Tasks.push({ index: r4Tasks.length + 1, module, subModule, rows, instructionTargeted: isInstructionTargeted });
         }
 
         const R4_CONCURRENCY = 6;
         const totalR4 = r4Tasks.length;
         const r4TaskFactories = r4Tasks.map(
-          ({ index, module, subModule, rows }) =>
+          ({ index, module, subModule, rows, instructionTargeted }) =>
             async () => {
-              const taskInstruction = hasInstruction ? instruction : undefined;
+              const taskInstruction = instructionTargeted ? instruction : undefined;
               try {
                 const r4Result = await runR4AgentForSubModule(
                   model,
