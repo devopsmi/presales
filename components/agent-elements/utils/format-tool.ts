@@ -4,6 +4,8 @@ type CachedToolState = {
   outputJson: string;
 };
 
+const MAX_TOOL_STATE_CACHE = 100;
+
 const toolStateCache = new Map<string, CachedToolState>();
 
 function getToolStateSnapshot(part: any): CachedToolState {
@@ -19,6 +21,10 @@ function hasToolStateChanged(toolCallId: string, part: any): boolean {
   const current = getToolStateSnapshot(part);
 
   if (!cached) {
+    if (toolStateCache.size >= MAX_TOOL_STATE_CACHE) {
+      const oldest = toolStateCache.keys().next().value!;
+      toolStateCache.delete(oldest);
+    }
     toolStateCache.set(toolCallId, current);
     return true;
   }

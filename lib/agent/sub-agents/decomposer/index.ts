@@ -16,6 +16,7 @@
  *     (b) what rows each spawned agent sees.
  */
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import type { DecomposerProgress } from "@/lib/agent/state";
 import type { DecomposerOutput } from "@/lib/agent/state";
 import type { QuotationRow } from "@/lib/types";
@@ -73,6 +74,7 @@ async function resolveR4InstructionTargets(
   instruction: string,
   allSubModules: SubModuleRef[],
   parentAffectedKeys: Set<string>,
+  config?: RunnableConfig,
 ): Promise<Set<string> | null> {
   // null = broad instruction, applies to ALL sub_modules
   const keyList = allSubModules
@@ -107,9 +109,10 @@ async function resolveR4InstructionTargets(
   });
 
   try {
-    const response = await model.invoke([
-      new HumanMessage(prompt),
-    ]);
+    const response = await model.invoke(
+      [new HumanMessage(prompt)],
+      config,
+    );
     const text = extractStringContent(response.content) || JSON.stringify(response.content);
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -163,6 +166,7 @@ export async function runDecomposer(
     previousRows?: QuotationRow[];
   },
   onProgress?: (progress: DecomposerProgress) => void,
+  config?: RunnableConfig,
 ): Promise<DecomposerOutput> {
   const brief = input.structuredBrief;
   if (!brief || !brief.trim()) {
@@ -206,7 +210,7 @@ export async function runDecomposer(
             : "正在分析产品模块划分...",
         });
 
-        result = await runR1Agent(model, table, brief, systemPrompt, instruction);
+        result = await runR1Agent(model, table, brief, systemPrompt, instruction, config);
 
         roundChanges[1] = table.buildChangeSet(result.changedIds);
 
@@ -230,7 +234,7 @@ export async function runDecomposer(
             : "正在拆解子模块...",
         });
 
-        result = await runR2Agent(model, table, brief, systemPrompt, instruction);
+        result = await runR2Agent(model, table, brief, systemPrompt, instruction, config);
 
         roundChanges[2] = table.buildChangeSet(result.changedIds);
 
@@ -267,7 +271,7 @@ export async function runDecomposer(
           }
         }
 
-        result = await runR3Agent(model, table, brief, contextRows, systemPrompt, instruction);
+        result = await runR3Agent(model, table, brief, contextRows, systemPrompt, instruction, config);
 
         roundChanges[3] = table.buildChangeSet(result.changedIds);
 
@@ -308,7 +312,7 @@ export async function runDecomposer(
             allSubModuleRefs.push({ module, subModule });
           }
           instructionTargetedKeys = await resolveR4InstructionTargets(
-            model, instruction!, allSubModuleRefs, parentAffectedKeys,
+            model, instruction!, allSubModuleRefs, parentAffectedKeys, config,
           );
 
           // Safety net: LLM returned empty targets + no parent changes → fallback to all
@@ -375,6 +379,7 @@ export async function runDecomposer(
                   taskInstruction,
                   index,
                   totalR4,
+                  config,
                 );
                 return { module, subModule, ...r4Result };
               } catch (err) {

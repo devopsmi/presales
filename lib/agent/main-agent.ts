@@ -256,6 +256,7 @@ function buildParseFilesTool() {
           const buffer = Buffer.from(file.body, "base64");
           const content = await parseFile(buffer, file.type, file.name);
           file.parsed = content;
+          file.body = "";
           parsedCount++;
           logger.info("file parsed", { index: file.index, name: file.name, type: file.type });
         } catch (err) {
@@ -368,6 +369,7 @@ function buildDecomposeTool(model: BaseChatModel) {
         (progress) => {
           cache.decomposerProgress = progress;
         },
+        config,
       );
 
       cache.stage = "decomposed";
@@ -428,7 +430,7 @@ function buildEstimateHoursTool(model: BaseChatModel) {
         vendorName: sessionConfig.vendorName,
         budgetRange: sessionConfig.budgetRange,
         instructions,
-      });
+      }, config);
 
       cache.stage = "estimated";
       cache.rows = result.rows;
@@ -489,7 +491,7 @@ function buildEvaluateTool(model: BaseChatModel) {
       const result = await runEvaluator(model, sessionId, {
         rows: cache.rows,
         structuredBrief: cache.structuredBrief,
-      });
+      }, config);
 
       cache.evaluationResult = result;
 
@@ -554,11 +556,14 @@ function buildGrillMeTool(model: BaseChatModel) {
         logger.info("grill agent created and cached", { modelKey: getModelKey(model), promptHash: hashPrompt(skillContent) });
       }
 
-      const result = await grillAgent.invoke({
-        messages: [
-          new HumanMessage(`请检查以下需求的完整性：\n\n${contentToCheck}\n\n按grill-me格式输出。`),
-        ],
-      });
+      const result = await grillAgent.invoke(
+        {
+          messages: [
+            new HumanMessage(`请检查以下需求的完整性：\n\n${contentToCheck}\n\n按grill-me格式输出。`),
+          ],
+        },
+        config,
+      );
 
       // Reasoning models (deepseek-v4, etc.) return content as [{type:"reasoning",...},{type:"text",text:"..."}]
       const rawContent = result.messages?.at(-1)?.content;

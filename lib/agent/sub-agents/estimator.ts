@@ -7,6 +7,7 @@ import path from "path";
 import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import type { TradeRole } from "@/lib/constants";
 import { VENDOR_NAME } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
@@ -144,6 +145,7 @@ async function invokeEstimateChunk(
     totalChunks: number;
     chunkIndex: number;
   },
+  config?: RunnableConfig,
 ): Promise<Record<string, Record<string, unknown>>> {
   const expectedSeqs = new Set(chunk.rows.map((r) => String(r.seq)));
 
@@ -159,9 +161,10 @@ async function invokeEstimateChunk(
       middleware: [createModelLoggingMiddleware("estimator")],
     });
 
-    const result = await agent.invoke({
-      messages: [new HumanMessage(userPrompt)],
-    });
+    const result = await agent.invoke(
+      { messages: [new HumanMessage(userPrompt)] },
+      config,
+    );
 
     const rawContent = result.messages?.at(-1)?.content;
     const output = extractStringContent(rawContent);
@@ -247,6 +250,7 @@ export async function runEstimator(
     budgetRange: [number, number];
     instructions?: string;
   },
+  config?: RunnableConfig,
 ): Promise<EstimatorOutput> {
   logger.info("estimator start", {
     rowCount: input.rows.length,
@@ -289,7 +293,7 @@ export async function runEstimator(
   const ESTIMATOR_CONCURRENCY = 10;
   const chunkResults = await concurrentLimit(
     ESTIMATOR_CONCURRENCY,
-    chunks.map((chunk) => () => invokeEstimateChunk(model, systemPrompt, chunk)),
+    chunks.map((chunk) => () => invokeEstimateChunk(model, systemPrompt, chunk, config)),
   );
 
   // Merge all chunk results into single seq→trades map

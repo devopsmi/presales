@@ -17,6 +17,7 @@
 import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import type { EvaluatorOutput } from "@/lib/agent/state";
 import type { QuotationRow } from "@/lib/types";
 import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
@@ -141,6 +142,7 @@ export async function runEvaluator(
     rows: QuotationRow[];
     structuredBrief: string;
   },
+  config?: RunnableConfig,
 ): Promise<EvaluatorOutput> {
   logger.info("evaluator start", {
     sessionId,
@@ -183,9 +185,10 @@ export async function runEvaluator(
       ? userPrompt
       : userPrompt + "\n\n⚠️ 上一次输出的 JSON 解析失败。请确保你的最后一条回复只包含一个纯 JSON 对象：以 `{` 开头、以 `}` 结尾，中间不包含任何其他文字。不要加前言、后记或 markdown 代码块标记。";
 
-    const result = await agent.invoke({
-      messages: [new HumanMessage(prompt)],
-    });
+    const result = await agent.invoke(
+      { messages: [new HumanMessage(prompt)] },
+      config,
+    );
 
     try {
       const evalResult = extractEvaluationFromMessages(result.messages);

@@ -117,7 +117,14 @@ function dur(ms: number): string {
  * request. This middleware captures them from the response and restores them
  * in subsequent requests so DeepSeek doesn't reject with 400.
  */
-const THINKING_KEY = Symbol.for("deepseek_thinking");
+/**
+ * Storage key for persisting deepseek thinking blocks.
+ *
+ * We store thinking blocks in `additional_kwargs` (a standard AIMessage field
+ * preserved through LangGraph serialization) rather than a Symbol property
+ * (which is silently dropped when messages are checkpointed/restored).
+ */
+const THINKING_KWARGS_KEY = "deepseek_thinking";
 
 function extractThinkingBlocks(content: unknown): ContentBlock[] | null {
   if (!Array.isArray(content)) return null;
@@ -126,7 +133,8 @@ function extractThinkingBlocks(content: unknown): ContentBlock[] | null {
 }
 
 function restoreThinkingBlocks(msg: Record<string, unknown>): void {
-  const blocks = (msg as any)[THINKING_KEY] as ContentBlock[] | undefined;
+  const additionalKwargs = (msg as any).additional_kwargs as Record<string, unknown> | undefined;
+  const blocks = additionalKwargs?.[THINKING_KWARGS_KEY] as ContentBlock[] | undefined;
   if (!blocks?.length) return;
 
   const content = msg.content;
@@ -144,7 +152,7 @@ export function createDeepseekThinkingMiddleware() {
   return createMiddleware({
     name: "DeepseekThinkingRepair",
     wrapModelCall: async (request: any, handler: any) => {
-      // PRE: restore thinking blocks from previous turns
+      // PRE: restore thinking blocks from additional_kwargs (survives serialization)
       if (request.messages) {
         for (const msg of request.messages) {
           if (typeof msg._getType === "function" && msg._getType() !== "ai") continue;
@@ -154,11 +162,16 @@ export function createDeepseekThinkingMiddleware() {
 
       const response = await handler(request);
 
-      // POST: capture thinking blocks from this turn's response
+      // POST: capture thinking blocks into additional_kwargs —
+      //       AIMessage.additional_kwargs survives LangGraph state
+      //       checkpoint/restore, unlike Symbol-keyed properties.
       const content = response.content;
       const thinking = extractThinkingBlocks(content);
       if (thinking) {
-        (response as any)[THINKING_KEY] = thinking;
+        response.additional_kwargs = {
+          ...(response.additional_kwargs || {}),
+          [THINKING_KWARGS_KEY]: thinking,
+        };
       }
 
       return response;

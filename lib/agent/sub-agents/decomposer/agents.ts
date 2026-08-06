@@ -1,6 +1,7 @@
 import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import { DecomposerTree } from "./table";
 import type { LevelRow } from "./table";
 import { createModelLoggingMiddleware, createDeepseekThinkingMiddleware, extractStringContent } from "@/lib/agent/llm";
@@ -46,16 +47,25 @@ async function invokeWithRetry(
   agent: AnyAgent,
   userPrompt: string,
   recursionLimit: number,
+  config?: RunnableConfig,
   maxRetries = 3,
   baseDelayMs = 1000,
 ): Promise<any> {
   let lastError: unknown;
+  const signal = config?.signal;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // Abort check before each attempt
+    if (signal?.aborted) {
+      const err = new Error(`${agentName}: aborted`);
+      (err as any).code = "ABORT_ERR";
+      throw err;
+    }
+
     try {
       return await (agent as any).invoke(
         { messages: [new HumanMessage(userPrompt)] },
-        { recursionLimit },
+        { recursionLimit, ...(signal ? { signal } : {}) },
       );
     } catch (err) {
       lastError = err;
@@ -66,7 +76,25 @@ async function invokeWithRetry(
       logger.warn(`${agentName} attempt ${attempt + 1} failed (retrying in ${delay}ms)`, {
         error: err instanceof Error ? err.message : String(err),
       });
-      await new Promise((r) => setTimeout(r, delay));
+
+      // Abort-aware sleep: listen for signal to cancel the sleep early
+      if (signal) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            if (signal.aborted) { reject(new Error(`${agentName}: aborted`)); return; }
+            const timer = setTimeout(() => {
+              signal.removeEventListener("abort", onAbort);
+              resolve();
+            }, delay);
+            const onAbort = () => { clearTimeout(timer); reject(new Error(`${agentName}: aborted`)); };
+            signal.addEventListener("abort", onAbort, { once: true });
+          });
+        } catch (abortErr) {
+          throw abortErr instanceof Error ? abortErr : new Error(String(abortErr));
+        }
+      } else {
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
   }
 
@@ -248,6 +276,7 @@ export async function runR1Agent(
   brief: string,
   systemPrompt: string,
   instruction?: string,
+  config?: RunnableConfig,
 ): Promise<RoundResult> {
   const beforeSnap = table.buildLevelSnapshot(1);
   const userPrompt = buildR1UserPrompt(table.getModuleNames(), { brief, instruction });
@@ -273,6 +302,7 @@ export async function runR1Agent(
     agent,
     userPrompt,
     12,
+    config,
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
@@ -292,6 +322,7 @@ export async function runR2Agent(
   brief: string,
   systemPrompt: string,
   instruction?: string,
+  config?: RunnableConfig,
 ): Promise<RoundResult> {
   const beforeSnap = table.buildLevelSnapshot(2);
   const userPrompt = buildR2UserPrompt(table.getModuleNames(), table.getSubModulePairs(), {
@@ -320,6 +351,7 @@ export async function runR2Agent(
     agent,
     userPrompt,
     15,
+    config,
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
@@ -340,6 +372,7 @@ export async function runR3Agent(
   contextRows: LevelRow[],
   systemPrompt: string,
   instruction?: string,
+  config?: RunnableConfig,
 ): Promise<RoundResult> {
   const beforeSnap = table.buildLevelSnapshot(3);
   const userPrompt = buildR3UserPrompt(contextRows, { brief, instruction });
@@ -365,6 +398,7 @@ export async function runR3Agent(
     agent,
     userPrompt,
     20,
+    config,
   );
 
   const output = extractStringContent(result.messages?.at(-1)?.content);
@@ -389,6 +423,7 @@ export async function runR4AgentForSubModule(
   instruction: string | undefined,
   agentIndex: number,
   totalAgents: number,
+  config?: RunnableConfig,
 ): Promise<RoundResult> {
   const agentPrefix = `R4 #${agentIndex}/${totalAgents}`;
   const agentLabel = `${agentPrefix} ${module}→${subModule}`;
@@ -426,6 +461,7 @@ export async function runR4AgentForSubModule(
     agent,
     userPrompt,
     20,
+    config,
   );
   const elapsed = Date.now() - t0;
 
