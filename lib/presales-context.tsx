@@ -1,8 +1,8 @@
 "use client";
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
-import type { TradeRole, Industry } from "@/lib/constants";
-import { DEFAULT_MODEL, DEFAULT_INDUSTRY, INDUSTRY_DEFAULTS, VENDOR_NAME, TRADE_DAILY_RATES } from "@/lib/constants";
+import type { TradeRole } from "@/lib/constants";
+import { DEFAULT_MODEL, VENDOR_NAME, TRADE_DAILY_RATES } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader, QuotedRates, FileTab } from "@/lib/types";
 import type { ModelConfig } from "@/lib/session-config";
 import { generateId } from "@/lib/utils";
@@ -57,7 +57,6 @@ async function syncConfigToBackend(
 
 interface PresalesState {
   selectedTrades: TradeRole[];
-  industry: Industry;
   budgetRange: [number, number];
   modelProvider: string;
   customModels: ModelConfig[];
@@ -77,7 +76,6 @@ interface PresalesState {
 
 interface PresalesContextValue extends PresalesState {
   setSelectedTrades: (trades: TradeRole[]) => void;
-  setIndustry: (industry: Industry) => void;
   setBudgetRange: (range: [number, number]) => void;
   setModelProvider: (model: string) => void;
   setCustomModels: (models: ModelConfig[]) => void;
@@ -113,7 +111,6 @@ function loadPreferences(): Partial<PresalesState> {
       const parsed = JSON.parse(stored);
       return {
         selectedTrades: parsed.selectedTrades ?? undefined,
-        industry: parsed.industry ?? undefined,
         budgetRange: parsed.budgetRange ?? undefined,
         modelProvider: parsed.modelProvider ?? undefined,
         customModels: parsed.customModels ?? undefined,
@@ -134,7 +131,6 @@ function savePreferences(state: PresalesState): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       selectedTrades: state.selectedTrades,
-      industry: state.industry,
       budgetRange: state.budgetRange,
       modelProvider: state.modelProvider,
       customModels: state.customModels,
@@ -149,8 +145,7 @@ function savePreferences(state: PresalesState): void {
 }
 
 const defaults: PresalesState = {
-  selectedTrades: INDUSTRY_DEFAULTS[DEFAULT_INDUSTRY],
-  industry: DEFAULT_INDUSTRY,
+  selectedTrades: ["frontend", "backend"],
   budgetRange: [0, 2000000],
   modelProvider: DEFAULT_MODEL,
   customModels: [],
@@ -174,9 +169,6 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
   const [sessionId, setSessionId] = useState<string>(loadSessionId);
   const [selectedTrades, setSelectedTradesRaw] = useState<TradeRole[]>(
     prefs.selectedTrades ?? defaults.selectedTrades
-  );
-  const [industry, setIndustryRaw] = useState<Industry>(
-    prefs.industry ?? defaults.industry
   );
   const [budgetRange, setBudgetRange] = useState<[number, number]>(
     prefs.budgetRange ?? defaults.budgetRange
@@ -209,12 +201,6 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
 
   // Avoid syncing on initial mount — only sync on subsequent changes
   const mountedRef = useRef(false);
-
-  // When industry changes, update selected trades to industry defaults
-  const setIndustry = useCallback((ind: Industry) => {
-    setIndustryRaw(ind);
-    setSelectedTradesRaw(INDUSTRY_DEFAULTS[ind]);
-  }, []);
 
   const setSelectedTrades = useCallback((trades: TradeRole[]) => {
     setSelectedTradesRaw(trades);
@@ -322,20 +308,20 @@ export function PresalesProvider({ children }: { children: ReactNode }) {
 
   // Persist preferences on change
   const currentState: PresalesState = {
-    selectedTrades, industry, budgetRange, modelProvider, customModels,
+    selectedTrades, budgetRange, modelProvider, customModels,
     attachments, quotation, header, sessionId, quotationTrades, vendorName,
     estimationPlanId, quotedRates, uploadError, fileTabs, activeRightTab, promptOverrides,
   };
 
   useEffect(() => {
     savePreferences(currentState);
-  }, [selectedTrades, industry, budgetRange, modelProvider, customModels, estimationPlanId, quotedRates, promptOverrides]);
+  }, [selectedTrades, budgetRange, modelProvider, customModels, estimationPlanId, quotedRates, promptOverrides]);
 
   const value: PresalesContextValue = {
-    selectedTrades, industry, budgetRange, modelProvider, customModels, attachments,
+    selectedTrades, budgetRange, modelProvider, customModels, attachments,
     quotation, header, sessionId, quotationTrades, vendorName, estimationPlanId, quotedRates,
     fileTabs, activeRightTab, promptOverrides,
-    setSelectedTrades, setIndustry, setBudgetRange, setModelProvider, setCustomModels,
+    setSelectedTrades, setBudgetRange, setModelProvider, setCustomModels,
     setAttachments, addAttachments, removeAttachment, uploadError, setUploadError,
     setQuotation, setHeader, setQuotationTrades, setQuotationResult, setVendorName, setEstimationPlanId, setQuotedRates, syncConfig, reset,
     setActiveRightTab, closeFileTab, setFileParsedContent, setPromptOverrides,

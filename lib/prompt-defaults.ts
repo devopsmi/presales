@@ -108,7 +108,7 @@ evaluate 返回的每个 issue 的 location 字段包含模块→子模块→功
 从任意环节重启后，必须按顺序跑完后续所有环节，不可中断：
 - 调了 decompose → 必须接着调 evaluate
 - evaluate 通过（passed=true）→ 必须接着调 estimate_hours
-- evaluate 不通过 → 按 issues 调 decompose({ roundInstructions }) 修正后重新 evaluate（evaluate 最多调用 2 次，超过后直接调 estimate_hours 生成报价）
+- evaluate 不通过 → 按 issues 调 decompose({ roundInstructions }) 修正后重新 evaluate（evaluate 最多调用 3 次，超过后仍须调 decompose 修正 issues，再直接调 estimate_hours，不再重新 evaluate）
 - estimate_hours 完成 → 流程结束，展示最终结果
 
 ## 核心原则

@@ -2,8 +2,6 @@
  * Estimator SubAgent — uses LangChain createAgent to fill man-day estimates
  * for each QuotationRow based on a skill-based estimation plan.
  */
-import fs from "fs";
-import path from "path";
 import { createAgent } from "langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
@@ -14,16 +12,21 @@ import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { EstimatorOutput } from "@/lib/agent/state";
 import { createModelLoggingMiddleware, extractStringContent } from "@/lib/agent/llm";
 import { getSessionConfig } from "@/lib/session-config";
+import { getDefaultPrompt } from "@/lib/prompt-defaults";
 import log from "@/lib/logger";
 import { concurrentLimit } from "@/lib/utils";
 
 const logger = log.child({ agent: "estimator" });
 
-const PLANS_DIR = path.resolve(process.cwd(), "lib", "agent", "skills", "plans");
+type AnyAgent = ReturnType<typeof createAgent>;
 
 function loadPlan(planId: string): string {
-  const planPath = path.join(PLANS_DIR, `${planId}.md`);
-  return fs.readFileSync(planPath, "utf-8");
+  const planKey = "plan_" + planId.replace(/-plan$/, "").replace(/-/g, "_");
+  const content = getDefaultPrompt(planKey);
+  if (!content) {
+    throw new Error(`Unknown estimation plan: "${planId}" (key: "${planKey}")`);
+  }
+  return content;
 }
 
 function buildSystemPrompt(planContent: string, selectedTrades: TradeRole[]): string {
@@ -132,8 +135,7 @@ function buildUserPromptForChunk(input: {
 }
 
 async function invokeEstimateChunk(
-  model: BaseChatModel,
-  systemPrompt: string,
+  agent: AnyAgent,
   chunk: {
     module: string;
     subModule: string;
@@ -154,12 +156,6 @@ async function invokeEstimateChunk(
     if (attempt > 0) {
       userPrompt += `\n\n⚠️ 上一次输出校验失败，请修正后重新输出。确保覆盖 seq: ${[...expectedSeqs].join(", ")}`;
     }
-
-    const agent = createAgent({
-      model,
-      systemPrompt,
-      middleware: [createModelLoggingMiddleware("estimator")],
-    });
 
     const result = await agent.invoke(
       { messages: [new HumanMessage(userPrompt)] },
@@ -291,9 +287,16 @@ export async function runEstimator(
   }));
 
   const ESTIMATOR_CONCURRENCY = 10;
+
+  const agent = createAgent({
+    model,
+    systemPrompt,
+    middleware: [createModelLoggingMiddleware("estimator")],
+  });
+
   const chunkResults = await concurrentLimit(
     ESTIMATOR_CONCURRENCY,
-    chunks.map((chunk) => () => invokeEstimateChunk(model, systemPrompt, chunk, config)),
+    chunks.map((chunk) => () => invokeEstimateChunk(agent, chunk, config)),
   );
 
   // Merge all chunk results into single seq→trades map

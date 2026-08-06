@@ -6,12 +6,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Button } from "@/components/ui/button";
 import { usePresales } from "@/lib/presales-context";
 
-function formatAmount(v: number): string {
-  if (v >= 10000) {
-    const wan = v / 10000;
-    return `${wan % 1 === 0 ? wan : wan.toFixed(1)}万`;
-  }
-  return v.toLocaleString();
+function toWanString(v: number): string {
+  const wan = v / 10000;
+  return wan % 1 === 0 ? String(wan) : wan.toFixed(1);
 }
 
 export function BudgetInput() {
@@ -22,24 +19,27 @@ export function BudgetInput() {
   const initialDeviation = max - initialPrice;
   const isDefault = min === 0 && max === 2000000;
 
-  const [priceStr, setPriceStr] = useState(() => String(initialPrice));
-  const [deviationStr, setDeviationStr] = useState(() => String(initialDeviation));
+  const [priceStr, setPriceStr] = useState(() => toWanString(initialPrice));
+  const [deviationStr, setDeviationStr] = useState(() => toWanString(initialDeviation));
   const [open, setOpen] = useState(false);
 
   // Sync from external budgetRange changes (e.g. reset, industry switch)
   useEffect(() => {
     const p = Math.round((min + max) / 2);
     const d = max - p;
-    setPriceStr(String(p));
-    setDeviationStr(String(d));
+    setPriceStr(toWanString(p));
+    setDeviationStr(toWanString(d));
   }, [min, max]);
 
   const commit = useCallback(() => {
     const p = Number(priceStr);
     const d = Number(deviationStr);
     if (isNaN(p) || isNaN(d) || d < 0) return;
-    const newMin = Math.max(0, p - d);
-    const newMax = p + d;
+    // Input values are in 万; convert back to raw numbers
+    const rawPrice = p * 10000;
+    const rawDev = d * 10000;
+    const newMin = Math.max(0, rawPrice - rawDev);
+    const newMax = rawPrice + rawDev;
     setBudgetRange([newMin, newMax]);
   }, [priceStr, deviationStr, setBudgetRange]);
 
@@ -58,14 +58,14 @@ export function BudgetInput() {
     if (o) {
       const p = Math.round((min + max) / 2);
       const d = max - p;
-      setPriceStr(String(p));
-      setDeviationStr(String(d));
+      setPriceStr(toWanString(p));
+      setDeviationStr(toWanString(d));
     } else {
       // Closed without confirming — revert to committed values
       const p = Math.round((min + max) / 2);
       const d = max - p;
-      setPriceStr(String(p));
-      setDeviationStr(String(d));
+      setPriceStr(toWanString(p));
+      setDeviationStr(toWanString(d));
     }
     setOpen(o);
   }
@@ -75,7 +75,7 @@ export function BudgetInput() {
   const labelSuffix =
     isDefault || isNaN(p) || isNaN(d)
       ? ""
-      : ` ${formatAmount(p)}±${formatAmount(d)}`;
+      : ` ${p}万±${d}万`;
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
@@ -97,17 +97,18 @@ export function BudgetInput() {
             onChange={(e) => setPriceStr(e.target.value)}
             onKeyDown={handleKeyDown}
             className="w-24 h-8 rounded-md border border-input bg-transparent px-2 py-1 text-sm text-center outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-inner-spin-button]:appearance-none"
-            placeholder="价格"
+            placeholder="价格(万)"
           />
-          <span className="text-sm text-muted-foreground select-none">±</span>
+          <span className="text-sm text-muted-foreground select-none">万 ±</span>
           <input
             type="number"
             value={deviationStr}
             onChange={(e) => setDeviationStr(e.target.value)}
             onKeyDown={handleKeyDown}
             className="w-20 h-8 rounded-md border border-input bg-transparent px-2 py-1 text-sm text-center outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 [&::-webkit-inner-spin-button]:appearance-none"
-            placeholder="偏差"
+            placeholder="偏差(万)"
           />
+          <span className="text-sm text-muted-foreground select-none">万</span>
           <Button size="sm" onClick={handleConfirm} className="ml-1">
             确定
           </Button>

@@ -1,7 +1,6 @@
 import type { UIMessage } from "ai";
 import { HumanMessage } from "@langchain/core/messages";
 import type { Attachment, SseMessage } from "@/lib/types";
-import { createModelInstance } from "@/lib/agent/llm";
 import { createPresalesAgent, getFileStatusMessage } from "@/lib/agent/main-agent";
 import { getSessionConfig } from "@/lib/session-config";
 import { MAX_FILE_COUNT, MAX_SINGLE_FILE_SIZE_MB, ALLOWED_FILE_TYPES } from "@/lib/constants";
@@ -102,7 +101,7 @@ function mapToolName(raw: string): string {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const sessionId: string | undefined = body.sessionId;
+    const sessionId: string = body.sessionId || crypto.randomUUID();
     const messages: UIMessage[] = body.messages ?? [];
     const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
     if (!lastUserMsg) return jsonErr("No user message", 400);
@@ -128,15 +127,14 @@ export async function POST(req: Request) {
     }
 
     const attachments = collectRawAttachments(valid);
-    const config = getSessionConfig(sessionId ?? "");
+    const config = getSessionConfig(sessionId);
 
     const modelCfg = config.models.find((m) => m.id === config.model);
-    const model = createModelInstance(modelCfg, "openai");
 
     const agent = createPresalesAgent({
-      model,
+      modelCfg,
       attachments,
-      sessionId: sessionId || "default",
+      sessionId,
     });
 
     const encoder = new TextEncoder();
@@ -157,8 +155,7 @@ export async function POST(req: Request) {
         };
 
         try {
-          const sid = sessionId || "default";
-          const fileStatus = getFileStatusMessage(sid);
+          const fileStatus = getFileStatusMessage(sessionId);
           const userContent = fileStatus
             ? `${fileStatus}\n\n用户消息: ${rawText}`
             : rawText;
@@ -166,7 +163,7 @@ export async function POST(req: Request) {
 
           const run = await agent.streamEvents(
             { messages: agentMessages },
-            { version: "v3", configurable: { thread_id: sid }, signal: abort.signal },
+            { version: "v3", configurable: { thread_id: sessionId }, signal: abort.signal },
           );
 
           // Synchronization flag: set to true when a tool event is sent, so the

@@ -109,9 +109,13 @@ async function resolveR4InstructionTargets(
   });
 
   try {
+    // MUST suppress callbacks — this LLM call runs inside the LangGraph
+    // agent's async context and inherits its streaming callbacks via
+    // AsyncLocalStorage. Without explicit suppression, the response text
+    // leaks to the frontend as SSE events.
     const response = await model.invoke(
       [new HumanMessage(prompt)],
-      config,
+      { callbacks: [], signal: config?.signal },
     );
     const text = extractStringContent(response.content) || JSON.stringify(response.content);
 

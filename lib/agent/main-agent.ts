@@ -33,12 +33,13 @@ import { TRADE_DAILY_RATES } from "@/lib/constants";
 import type { QuotationRow, QuotationHeader } from "@/lib/types";
 import type { PipelineStage, DecomposerProgress, StoredFile, EvaluatorOutput } from "@/lib/agent/state";
 import { getSessionConfig } from "@/lib/session-config";
+import type { ModelConfig } from "@/lib/session-config";
 import { parseFile } from "@/lib/agent/tools/file-parser";
 import { runDecomposer } from "@/lib/agent/sub-agents/decomposer/index";
 import { runEstimator } from "@/lib/agent/sub-agents/estimator";
 import { runEvaluator } from "@/lib/agent/sub-agents/evaluator";
 import log from "@/lib/logger";
-import { createModelLoggingMiddleware } from "@/lib/agent/llm";
+import { createModelInstance, createModelLoggingMiddleware, createDeepseekThinkingMiddleware } from "@/lib/agent/llm";
 import { resolvePrompt } from "@/lib/prompt-defaults";
 
 const logger = log.child({ agent: "main" });
@@ -60,7 +61,7 @@ function getModelKey(model: BaseChatModel): string {
 }
 
 function getSessionId(config?: RunnableConfig): string {
-  return (config?.configurable?.thread_id as string) || "default";
+  return (config?.configurable?.thread_id as string) || crypto.randomUUID();
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +374,12 @@ function buildDecomposeTool(model: BaseChatModel) {
       );
 
       cache.stage = "decomposed";
+      // After evaluate limit exceeded, decompose-with-roundInstructions is the
+      // final fix pass — set stage to "evaluated" so estimate_hours can proceed
+      // without requiring (and hitting the limit on) another evaluate call.
+      if (cache.evaluateCount >= MAX_EVALUATE_CALLS) {
+        cache.stage = "evaluated";
+      }
       cache.rows = result.rows;
 
       return JSON.stringify({
@@ -456,8 +463,9 @@ function buildEstimateHoursTool(model: BaseChatModel) {
   );
 }
 
+export const MAX_EVALUATE_CALLS = 3;
+
 function buildEvaluateTool(model: BaseChatModel) {
-  const MAX_EVALUATE_CALLS = 2;
 
   return tool(
     async (_input: Record<string, never>, config?: RunnableConfig) => {
@@ -508,13 +516,13 @@ function buildEvaluateTool(model: BaseChatModel) {
         message: result.passed
           ? `评估通过：功能拆解与原需求一致。`
           : cache.evaluateCount >= MAX_EVALUATE_CALLS
-            ? `评估不通过（第 ${cache.evaluateCount}/${MAX_EVALUATE_CALLS} 次，已达上限）：发现 ${result.issues.filter(i => i.severity === "error").length} 个错误、${result.issues.filter(i => i.severity === "warning").length} 个警告。不再重新评估，请直接调用 estimate_hours 生成最终报价表。`
+            ? `评估不通过（第 ${cache.evaluateCount}/${MAX_EVALUATE_CALLS} 次，已达上限）：发现 ${result.issues.filter(i => i.severity === "error").length} 个错误、${result.issues.filter(i => i.severity === "warning").length} 个警告。请先用 decompose({ roundInstructions }) 修正 issues，再调用 estimate_hours（不再重新 evaluate）。`
             : `评估不通过（第 ${cache.evaluateCount}/${MAX_EVALUATE_CALLS} 次）：发现 ${result.issues.filter(i => i.severity === "error").length} 个错误、${result.issues.filter(i => i.severity === "warning").length} 个警告。请根据 issues 中的具体描述修正后重新评估。`,
       });
     },
     {
       name: "evaluate",
-      description: "评估功能拆解与原需求简报的一致性。必须在 decompose 之后、estimate_hours 之前调用。最多调用 2 次，超过后需直接调用 estimate_hours 生成报价。需求详细时检查是否存在遗漏、重复、无中生有或与原需求不一致的情况。不通过则需修正后重新评估。",
+      description: "评估功能拆解与原需求简报的一致性。必须在 decompose 之后、estimate_hours 之前调用。最多调用 3 次，超过后需直接调用 estimate_hours 生成报价。需求详细时检查是否存在遗漏、重复、无中生有或与原需求不一致的情况。不通过则需修正后重新评估。",
       schema: z.object({}),
     },
   );
@@ -551,6 +559,7 @@ function buildGrillMeTool(model: BaseChatModel) {
         grillAgent = createAgent({
           model,
           systemPrompt: skillContent,
+          middleware: [createDeepseekThinkingMiddleware(), createModelLoggingMiddleware("grill")],
         });
         agentCache.set(grillCacheKey, grillAgent);
         logger.info("grill agent created and cached", { modelKey: getModelKey(model), promptHash: hashPrompt(skillContent) });
@@ -672,17 +681,19 @@ function buildAgent(model: BaseChatModel, systemPrompt: string) {
 // ---------------------------------------------------------------------------
 
 export interface CreateMainAgentInput {
-  model: BaseChatModel;
+  modelCfg?: ModelConfig;
+  defaultProvider?: "openai" | "anthropic";
   attachments: Attachment[];
   sessionId?: string;
 }
 
 export function createPresalesAgent(input: CreateMainAgentInput) {
-  const sessionId = input.sessionId || "default";
+  const sessionId = input.sessionId || crypto.randomUUID();
   const cache = getOrCreateSessionCache(sessionId);
   ingestAttachments(cache, input.attachments);
 
-  const modelKey = getModelKey(input.model);
+  const cfg = input.modelCfg;
+  const modelKey = cfg?.model ?? "gpt-4o-mini";
   const sessionConfig = getSessionConfig(sessionId);
   const effectivePrompt = resolvePrompt("main", sessionConfig.promptOverrides);
   const cacheKey = `${modelKey}__${hashPrompt(effectivePrompt)}`;
@@ -692,7 +703,8 @@ export function createPresalesAgent(input: CreateMainAgentInput) {
       const oldest = agentCache.keys().next().value!;
       agentCache.delete(oldest);
     }
-    agentCache.set(cacheKey, buildAgent(input.model, effectivePrompt));
+    const model = createModelInstance(cfg, input.defaultProvider ?? "openai");
+    agentCache.set(cacheKey, buildAgent(model, effectivePrompt));
     logger.info("agent created and cached", { modelKey, promptHash: hashPrompt(effectivePrompt) });
   }
 

@@ -2,20 +2,12 @@
 
 import { useRef } from "react";
 import { Paperclip, X } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { usePresales } from "@/lib/presales-context";
 import { MAX_FILE_SIZE_MB } from "@/lib/constants";
 
 export function FileUploadMenu() {
-  const pdfRef = useRef<HTMLInputElement>(null);
-  const wordRef = useRef<HTMLInputElement>(null);
-  const excelRef = useRef<HTMLInputElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const { attachments, addAttachments, uploadError, setUploadError } = usePresales();
 
   function handleFiles(files: FileList | null) {
@@ -38,31 +30,9 @@ export function FileUploadMenu() {
   return (
     <>
       <input
-        ref={pdfRef}
+        ref={fileRef}
         type="file"
-        accept=".pdf"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          handleFiles(e.target.files);
-          e.target.value = "";
-        }}
-      />
-      <input
-        ref={wordRef}
-        type="file"
-        accept=".docx,.doc"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          handleFiles(e.target.files);
-          e.target.value = "";
-        }}
-      />
-      <input
-        ref={excelRef}
-        type="file"
-        accept=".xlsx,.xls"
+        accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.pdf,.docx,.xlsx"
         multiple
         className="hidden"
         onChange={(e) => {
@@ -71,30 +41,19 @@ export function FileUploadMenu() {
         }}
       />
 
-      <DropdownMenu>
-        <DropdownMenuTrigger>
-          <span className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer">
-            <Paperclip className="size-4" />
-            <span>上传文件</span>
-            {attachments.length > 0 && (
-              <Badge variant="secondary" className="ml-0.5 h-5 px-1 text-xs">
-                {attachments.length}
-              </Badge>
-            )}
-          </span>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-48">
-          <DropdownMenuItem onClick={() => pdfRef.current?.click()}>
-            PDF 文档 (.pdf)
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => wordRef.current?.click()}>
-            Word 文档 (.docx, .doc)
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => excelRef.current?.click()}>
-            Excel 表格 (.xlsx, .xls)
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <button
+        type="button"
+        onClick={() => fileRef.current?.click()}
+        className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors cursor-pointer"
+      >
+        <Paperclip className="size-4" />
+        <span>上传文件</span>
+        {attachments.length > 0 && (
+          <Badge variant="secondary" className="ml-0.5 h-5 px-1 text-xs">
+            {attachments.length}
+          </Badge>
+        )}
+      </button>
 
       {uploadError && (
         <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 text-xs text-destructive-foreground bg-destructive/90 px-3 py-2 rounded-md shadow-lg max-w-lg">
